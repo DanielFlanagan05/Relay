@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import { bundledSkills, normalizeSkill, initialSkills } from "./skills.mjs";
+import { sealProtocol } from "./delegation.mjs";
 
 export const id = () => randomUUID();
 export const now = () => new Date().toISOString();
@@ -19,6 +20,7 @@ export const defaults = () => ({
   models: [],
   hooks: bundledSkills(),
   tasks: [],
+  delegations: [],
   settings: {
     reserveGiB: 8,
     cloudParallel: 4,
@@ -62,8 +64,13 @@ export class Store {
         s.status = "interrupted";
         s.queueReason =
           "The app closed during this turn. Send a new message to continue.";
+        delete s.delegationRoundId;
         for (const m of s.messages)
-          if (m.status === "streaming") m.status = "interrupted";
+          if (m.status === "streaming") {
+            m.status = "interrupted";
+            // Unanswered tool calls would corrupt the next request's protocol.
+            sealProtocol(m);
+          }
       }
     }
     for (const task of this.data.tasks) {
@@ -99,8 +106,25 @@ export class Store {
       nextTurnHookIds: [],
       disabledNextTurnHookIds: [],
       outputFormat: "auto",
+      delegation: false,
       ...s,
     }));
+    // Rounds never survive a restart: an unreplayed tool loop must not look live.
+    value.delegations = (
+      Array.isArray(value.delegations) ? value.delegations : []
+    ).map((round) => {
+      if (
+        !["complete", "failed", "canceled", "interrupted"].includes(
+          round.status,
+        )
+      ) {
+        round.status = "interrupted";
+        round.error =
+          round.error ||
+          "The app closed during this delegation. Children were not replayed.";
+      }
+      return round;
+    });
     return {
       ...defaults(),
       ...value,
@@ -134,6 +158,7 @@ export class Store {
     parentId,
     permission = "read-only",
     preset = "chat",
+    delegation = false,
   }) {
     const session = {
       id: id(),
@@ -147,6 +172,7 @@ export class Store {
       disabledNextTurnHookIds: [],
       outputFormat: "auto",
       preset,
+      delegation: !!delegation,
       parentId,
       createdAt: now(),
       updatedAt: now(),

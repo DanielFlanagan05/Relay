@@ -5,13 +5,12 @@ import type { Session } from "../../types";
 
 export type ReadState = Record<string, string>;
 
-export const SAFE_PARSE = <T,>(
-  raw: string | null,
-  fallback: T,
-): T => {
+export const SAFE_PARSE = <T>(raw: string | null, fallback: T): T => {
   try {
     const value = raw ? JSON.parse(raw) : null;
-    return value !== null && typeof value === "object" ? (value as T) : fallback;
+    return value !== null && typeof value === "object"
+      ? (value as T)
+      : fallback;
   } catch {
     return fallback;
   }
@@ -28,9 +27,7 @@ export const isUnread = (
   readState: ReadState,
   selectedId: string | null,
 ): boolean =>
-  !s.archived &&
-  s.id !== selectedId &&
-  (readState[s.id] || "") < s.updatedAt;
+  !s.archived && s.id !== selectedId && (readState[s.id] || "") < s.updatedAt;
 
 export const filterSessions = (
   sessions: Session[],
@@ -79,9 +76,17 @@ export const groupByWorkspace = (sessions: Session[]): WorkspaceGroup[] => {
   return [...map.entries()]
     .map(([cwd, list]) => ({ cwd, sessions: list }))
     .sort((a, b) =>
-      (b.sessions[0]?.updatedAt || "").localeCompare(
-        a.sessions[0]?.updatedAt || "",
-      ),
+      b.sessions
+        .reduce(
+          (latest, s) => (s.updatedAt > latest ? s.updatedAt : latest),
+          "",
+        )
+        .localeCompare(
+          a.sessions.reduce(
+            (latest, s) => (s.updatedAt > latest ? s.updatedAt : latest),
+            "",
+          ),
+        ),
     );
 };
 
@@ -128,7 +133,8 @@ export const resizeValue = (
 ): number | null => {
   const direction = reverse ? -1 : 1;
   let next: number | null = null;
-  if (key === "ArrowRight" || key === "ArrowUp") next = value + step * direction;
+  if (key === "ArrowRight" || key === "ArrowUp")
+    next = value + step * direction;
   else if (key === "ArrowLeft" || key === "ArrowDown")
     next = value - step * direction;
   else if (key === "PageUp") next = value + step * 4 * direction;

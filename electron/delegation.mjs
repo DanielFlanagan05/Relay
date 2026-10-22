@@ -71,14 +71,16 @@ const descriptions = {
     "Cancel one of your own delegated tasks that is no longer needed. Its partial output stays available in task_status.",
 };
 
-export const toolSpecs = Object.entries(argumentSchemas).map(([name, schema]) => ({
-  type: "function",
-  function: {
-    name,
-    description: descriptions[name],
-    parameters: zodToJsonSchema(schema),
-  },
-}));
+export const toolSpecs = Object.entries(argumentSchemas).map(
+  ([name, schema]) => ({
+    type: "function",
+    function: {
+      name,
+      description: descriptions[name],
+      parameters: zodToJsonSchema(schema),
+    },
+  }),
+);
 
 // Small structural projection of the argument schemas onto the JSON Schema
 // subset OpenAI-compatible endpoints accept. Kept next to the validators so a
@@ -95,7 +97,8 @@ function zodToJsonSchema(schema) {
   return {
     type: "object",
     properties,
-    required,
+    // Some strict validators reject an empty required array.
+    ...(required.length ? { required } : {}),
     additionalProperties: false,
   };
 }
@@ -105,22 +108,34 @@ function unwrap(value) {
   return current;
 }
 function isOptional(value) {
-  return value?.isOptional?.() === true || value?._def?.typeName === "ZodDefault";
+  return (
+    value?.isOptional?.() === true || value?._def?.typeName === "ZodDefault"
+  );
 }
 function jsonType(schema) {
   const kind = schema?._def?.typeName;
   if (kind === "ZodArray")
-    return { type: "array", items: jsonType(schema._def.type), maxItems: LIMITS.children };
+    return {
+      type: "array",
+      items: jsonType(schema._def.type),
+      maxItems: LIMITS.children,
+    };
   if (kind === "ZodNumber")
     return {
       type: "integer",
       ...(schema._def?.checks?.length
         ? {
             ...(schema._def.checks.find((c) => c.kind === "min")
-              ? { minimum: schema._def.checks.find((c) => c.kind === "min").value }
+              ? {
+                  minimum: schema._def.checks.find((c) => c.kind === "min")
+                    .value,
+                }
               : {}),
             ...(schema._def.checks.find((c) => c.kind === "max")
-              ? { maximum: schema._def.checks.find((c) => c.kind === "max").value }
+              ? {
+                  maximum: schema._def.checks.find((c) => c.kind === "max")
+                    .value,
+                }
               : {}),
           }
         : {}),
@@ -167,8 +182,10 @@ export class ToolCallAccumulator {
       }
       let entry;
       if (Number.isFinite(delta.index)) entry = this.at(delta.index);
-      else if (delta.id && !this.entries.some((e) => e.id === delta.id))
-        entry = this.open(String(delta.id).slice(0, 200));
+      else if (delta.id)
+        entry =
+          this.entries.find((e) => e.id === String(delta.id).slice(0, 200)) ||
+          this.open(String(delta.id).slice(0, 200));
       else entry = this.entries.at(-1) || this.open();
       if (delta.id) entry.id = String(delta.id).slice(0, 200);
       const fn = delta.function || delta.func || {};
@@ -247,7 +264,10 @@ export function protocolMessages(protocol = []) {
           tool_calls: complete.map((c) => ({
             id: c.id,
             type: "function",
-            function: { name: c.function.name, arguments: c.function.arguments },
+            function: {
+              name: c.function.name,
+              arguments: c.function.arguments,
+            },
           })),
         });
       else if (text) out.push({ role: "assistant", content: text });
@@ -288,7 +308,10 @@ export function appendToolResult(answer, callId, content, name = "") {
 }
 
 /** Every tool call needs an answer before the next request or the model sees a broken transcript. */
-export function sealProtocol(answer, note = "No result: this turn was stopped.") {
+export function sealProtocol(
+  answer,
+  note = "No result: this turn was stopped.",
+) {
   if (!answer?.protocol?.length) return;
   for (const entry of answer.protocol)
     for (const call of entry.tool_calls || [])
@@ -297,6 +320,9 @@ export function sealProtocol(answer, note = "No result: this turn was stopped.")
 
 const roundTerminal = (round) =>
   ["complete", "failed", "canceled", "interrupted"].includes(round.status);
+
+const BUDGET_MESSAGE =
+  "The delegation budget for this turn is spent; no further tool calls were executed. Summarize what you know and name the unresolved work.";
 
 export class DelegationEngine {
   constructor(service) {
@@ -332,7 +358,8 @@ export class DelegationEngine {
   begin({ session, answer, prompt }) {
     if (!this.enabledFor(session)) return null;
     const existing = this.openRound(session.id);
-    if (existing) this.retire(existing, "interrupted", "A new turn replaced it.");
+    if (existing)
+      this.retire(existing, "interrupted", "A new turn replaced it.");
     for (const round of this.list(session.id))
       if (round.endedAt && Date.now() - Date.parse(round.endedAt) > 864e5)
         this.data.delegations.splice(this.data.delegations.indexOf(round), 1);
@@ -355,16 +382,26 @@ export class DelegationEngine {
       error: "",
     };
     this.data.delegations.push(round);
-    if (this.data.delegations.length > LIMITS.history)
-      this.data.delegations.splice(
-        0,
-        this.data.delegations.length - LIMITS.history,
-      );
+    // Never evict a live turn: continuations and cancellation need its record.
+    while (this.data.delegations.length > LIMITS.history) {
+      const index = this.data.delegations.findIndex(roundTerminal);
+      if (index < 0) break;
+      this.data.delegations.splice(index, 1);
+    }
     session.delegationRoundId = round.id;
     return round;
   }
+  /** The exact OpenAI transcript for the next provider round of this turn. */
+  conversation(round, answer) {
+    const session = this.service.store.session(round.parentSessionId);
+    return [
+      ...openaiHistory(session),
+      { role: "user", content: round.prompt },
+      ...protocolMessages(answer.protocol || []),
+    ];
+  }
   /** Streamed calls for one round, validated against this session's protocol. */
-  compile({ round, session, outcome, emit }) {
+  compile({ round, session, outcome, emit, deny = false }) {
     // Only calls that arrived on the tool-call channel can become actions.
     const answer = this.answer(round);
     const streamed = outcome?.toolCalls || [];
@@ -381,8 +418,15 @@ export class DelegationEngine {
     const actions = [];
     answer.protocol || (answer.protocol = []);
     const calls = [];
-    for (const raw of streamed.slice(0, LIMITS.callsPerRound + 2)) {
-      const compiled = compileToolCall(raw, { allowed });
+    if (deny) round.final = true;
+    for (const [index, raw] of streamed.entries()) {
+      // A spent budget refuses the action instead of executing it.
+      const compiled =
+        deny ||
+        index >= LIMITS.callsPerRound ||
+        round.calls + index >= LIMITS.callsTotal
+          ? { ok: false, error: BUDGET_MESSAGE }
+          : compileToolCall(raw, { allowed });
       if (!compiled.ok) {
         calls.push({
           id: raw.id,
@@ -405,27 +449,10 @@ export class DelegationEngine {
       });
       actions.push(compiled);
     }
-    if (streamed.length > LIMITS.callsPerRound)
-      for (const raw of streamed.slice(LIMITS.callsPerRound)) {
-        calls.push({
-          id: raw.id,
-          type: "function",
-          function: {
-            name: raw.name.slice(0, 120) || "unknown",
-            arguments: raw.arguments.slice(0, 2000),
-          },
-        });
-        actions.push({
-          ok: false,
-          id: raw.id,
-          name: raw.name,
-          error: "Per-round tool-call limit reached; this call was not executed.",
-        });
-      }
-    if (calls.length || outcome.text)
+    if (calls.length || outcome?.text)
       answer.protocol.push({
         role: "assistant",
-        content: outcome.text || null,
+        content: outcome?.text || null,
         tool_calls: calls,
       });
     return actions;
@@ -433,7 +460,8 @@ export class DelegationEngine {
   answer(round) {
     const session = this.service.store.session(round.parentSessionId);
     const found = session.messages.find((m) => m.id === round.parentAnswerId);
-    if (!found) throw new Error("The answer this delegation belongs to is gone");
+    if (!found)
+      throw new Error("The answer this delegation belongs to is gone");
     return found;
   }
   taskById(id) {
@@ -455,7 +483,11 @@ export class DelegationEngine {
       const result = await this.invoke({ round, session, action, emit });
       if (result.wait) {
         waitCalls.push(action.id);
-        wait = result;
+        wait = {
+          ...result,
+          taskIds: [...new Set([...(wait?.taskIds || []), ...result.taskIds])],
+          seconds: Math.min(wait?.seconds ?? result.seconds, result.seconds),
+        };
         continue;
       }
       this.reply(round, action, result.text, result.error);
@@ -520,8 +552,12 @@ export class DelegationEngine {
         if (
           tasks
             .list(session.id)
-            .filter((t) => !["complete", "failed", "canceled", "interrupted"].includes(t.status))
-            .length >= LIMITS.children
+            .filter(
+              (t) =>
+                !["complete", "failed", "canceled", "interrupted"].includes(
+                  t.status,
+                ),
+            ).length >= LIMITS.children
         )
           return {
             text: "",
@@ -565,23 +601,32 @@ export class DelegationEngine {
         };
       }
       case "wait_for_tasks": {
-        const mine = new Set(tasks.list(session.id).map((t) => t.id));
-        const wanted = action.args.task_ids.length
-          ? action.args.task_ids.filter((id) => mine.has(id))
-          : tasks
-              .list(session.id)
-              .filter((t) => !tasksTerminal(t))
-              .map((t) => t.id);
-        if (action.args.task_ids.some((id) => !mine.has(id)))
+        const mine = tasks.list(session.id);
+        const ids = action.args.task_ids;
+        if (ids.some((id) => !mine.some((t) => t.id === id)))
           return {
             text: "",
             error:
-              "You can only wait for tasks started by this session. Ignored the unknown ids.",
+              "You can only wait for tasks started by this session. Unknown ids were ignored.",
           };
-        const running = wanted.filter((id) => !tasksTerminal(this.taskById(id)));
+        const selected = (
+          ids.length
+            ? mine.filter((t) => ids.includes(t.id))
+            : mine.filter((t) => !tasksTerminal(t))
+        ).map((t) => t.id);
+        const running = selected.filter(
+          (id) => !tasksTerminal(this.taskById(id)),
+        );
         if (!running.length)
           return {
-            text: runningSummary(tasks, wanted, "No listed task is still running."),
+            // Nothing to wait for: hand back the latest statuses instead.
+            text: runningSummary(
+              this,
+              ids.length
+                ? selected
+                : mine.slice(-LIMITS.statusLines).map((t) => t.id),
+              "No delegated tasks in this session yet.",
+            ),
           };
         return {
           wait: true,
@@ -597,7 +642,8 @@ export class DelegationEngine {
         if (!task)
           return {
             text: "",
-            error: "Task not found. You can only cancel tasks started by this session.",
+            error:
+              "Task not found. You can only cancel tasks started by this session.",
           };
         tasks.cancel(task.id);
         return {
@@ -615,7 +661,9 @@ export class DelegationEngine {
       `objective: ${task.objective.slice(0, 300)}`,
       task.error ? `error: ${task.error.slice(0, 400)}` : "",
       task.result ? `result: ${task.result.slice(0, 2200)}` : "",
-      task.truncated ? "(result truncated; the child session keeps the full output)" : "",
+      task.truncated
+        ? "(result truncated; the child session keeps the full output)"
+        : "",
     ]
       .filter(Boolean)
       .join("\n");
@@ -623,16 +671,30 @@ export class DelegationEngine {
   /** Releases the inference slot: nothing is scheduled for the parent while it waits. */
   park(round, { taskIds, seconds, callIds }) {
     const session = this.service.store.session(round.parentSessionId);
-    round.status = "waiting";
-    round.waitCallIds = [...new Set([...round.waitCallIds, ...callIds])];
-    round.waitingOn = [...new Set([...round.waitingOn, ...taskIds])].filter(
+    const waiting = [...new Set([...round.waitingOn, ...taskIds])].filter(
       (id) => !tasksTerminal(this.taskById(id)),
     );
-    // Everything already finished: resume now rather than parking an empty wait.
-    if (!round.waitingOn.length)
-      return this.resume(round, "Delegated tasks were already finished."), {
-        parked: false,
-      };
+    if (!waiting.length) {
+      // Nothing to wait for: answer the wait inside this same turn instead of
+      // queueing a continuation the current job already occupies.
+      const answer = this.answer(round);
+      for (const callId of callIds)
+        appendToolResult(
+          answer,
+          callId,
+          this.summary(
+            round,
+            "Delegated tasks were already finished.",
+            taskIds,
+          ),
+          "wait_for_tasks",
+        );
+      this.service.changed(true);
+      return { parked: false };
+    }
+    round.status = "waiting";
+    round.waitCallIds = [...new Set(callIds)];
+    round.waitingOn = waiting;
     round.waitUntil = Date.now() + seconds * 1000;
     session.status = "queued";
     session.queueReason = `Waiting for ${round.waitingOn.length} delegated task(s); the inference slot is released`;
@@ -671,6 +733,7 @@ export class DelegationEngine {
         roundId: round.id,
         prompt: round.prompt,
         outputFormat: session.outputFormat,
+        controller: new AbortController(),
         settled: () => this.service.tasks.settled(session.id),
         waiting: (reason) => {
           session.queueReason = reason;
@@ -687,18 +750,22 @@ export class DelegationEngine {
     }
     this.service.changed(true);
   }
-  summary(round, note = "") {
-    const tasks = this.service.tasks;
-    const ids = round.waitingOn.length
+  summary(
+    round,
+    note = "",
+    ids = round.waitingOn.length
       ? round.waitingOn
-      : round.children.slice(-LIMITS.children);
+      : round.children.slice(-LIMITS.children),
+  ) {
     const lines = ids
       .map((id) => this.taskById(id))
       .filter(Boolean)
       .map((t) => this.statusLine(t));
     return [
       note,
-      lines.length ? lines.join("\n\n") : "No delegated task records were found.",
+      lines.length
+        ? lines.join("\n\n")
+        : "No delegated task records were found.",
       `Rounds used: ${round.round}/${LIMITS.rounds}. Delegation is experimental and has not been qualified with a live model.`,
     ]
       .filter(Boolean)
@@ -709,9 +776,32 @@ export class DelegationEngine {
   enforceBudgets() {
     for (const round of [...this.data.delegations]) {
       if (roundTerminal(round)) continue;
+      // Self-healing: a round must never keep a session locked when nothing is
+      // running and nothing is left to wait for.
+      if (
+        round.status === "waiting" &&
+        round.waitingOn.every((id) => tasksTerminal(this.taskById(id)))
+      )
+        this.resume(
+          round,
+          "Delegated tasks settled while the turn was resuming.",
+        );
+      const busy =
+        this.service.scheduler.active.has(round.parentSessionId) ||
+        this.service.scheduler.pending.some(
+          (j) => j.sessionId === round.parentSessionId,
+        );
+      if (!busy && round.status === "running" && !round.waitingOn.length)
+        this.retire(
+          round,
+          "failed",
+          "The delegation round ended without a running turn.",
+        );
       const expired = Date.now() > round.deadline;
       const waitExpired =
-        round.status === "waiting" && round.waitUntil && Date.now() > round.waitUntil;
+        round.status === "waiting" &&
+        round.waitUntil &&
+        Date.now() > round.waitUntil;
       if (!expired && !waitExpired) continue;
       if (round.status === "waiting") {
         const stragglers = round.waitingOn.filter(
@@ -721,17 +811,22 @@ export class DelegationEngine {
         round.round = LIMITS.rounds;
         round.error = expired
           ? "The delegation turn exceeded its elapsed budget"
-          : "The wait budget expired; outstanding tasks keep running";
+          : "The wait budget expired; unfinished children were canceled";
+        // Cancelling first is what keeps a one-slot runtime moving: the parent
+        // needs the slot back and cannot resume behind its own children.
+        for (const id of stragglers) cancelQuietly(this.service, id);
         this.resume(
           round,
           expired
             ? "Delegation budget exceeded. Outstanding tasks were canceled; summarize partial results and unresolved work."
-            : "The wait budget expired. Outstanding tasks are still running; use their partial status.",
+            : "The wait budget expired. Outstanding tasks were canceled so this turn could continue; report their partial state and the unresolved work.",
         );
-        if (expired)
-          for (const id of stragglers) cancelQuietly(this.service, id);
       } else if (expired) {
-        this.retire(round, "failed", "The delegation turn exceeded its elapsed budget");
+        this.retire(
+          round,
+          "failed",
+          "The delegation turn exceeded its elapsed budget",
+        );
         this.service.scheduler.cancel(round.parentSessionId);
       }
     }
@@ -739,7 +834,8 @@ export class DelegationEngine {
   /** A stopped or failed parent must not leave children running. */
   abortFor(session) {
     for (const round of this.list(session.id))
-      if (!roundTerminal(round)) this.retire(round, "canceled", "The parent turn stopped.");
+      if (!roundTerminal(round))
+        this.retire(round, "canceled", "The parent turn stopped.");
   }
   retire(round, status, error) {
     if (roundTerminal(round)) return;
@@ -754,7 +850,8 @@ export class DelegationEngine {
       sealProtocol(this.answer(round));
     } catch {}
     const session = this.service.store.session(round.parentSessionId);
-    if (session.delegationRoundId === round.id) delete session.delegationRoundId;
+    if (session.delegationRoundId === round.id)
+      delete session.delegationRoundId;
     this.service.changed(true);
   }
   finish(round, status = "complete", error = "") {
@@ -774,20 +871,22 @@ function cancelQuietly(service, id) {
     service.tasks.cancel(id);
   } catch {}
 }
-function runningSummary(tasks, ids, empty) {
-  const list = ids.map((id) => tasks.find(id)).filter(Boolean);
+function runningSummary(engine, ids, empty) {
+  const list = ids.map((id) => engine.taskById(id)).filter(Boolean);
   if (!list.length) return empty;
-  return list.map((t) => statusLineStatic(t)).join("\n\n").slice(0, LIMITS.resultChars);
+  return list
+    .map((t) => statusLineStatic(t))
+    .join("\n\n")
+    .slice(0, LIMITS.resultChars);
 }
 function statusLineStatic(task) {
   return [
     `task ${task.id}`,
     `status: ${task.status}`,
+    `objective: ${(task.objective || "").slice(0, 300)}`,
     task.error ? `error: ${task.error.slice(0, 400)}` : "",
     task.result ? `result: ${task.result.slice(0, 2200)}` : "",
   ]
     .filter(Boolean)
     .join("\n");
 }
-
-export const delegationRoundTerminal = roundTerminal;

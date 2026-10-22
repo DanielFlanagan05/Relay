@@ -67,10 +67,17 @@ export function capabilities(session) {
     writeFiles:
       session.harness !== "direct" && session.permission === "workspace-write",
     readOnly: session.harness !== "hermes",
-    delegation: false,
+    // Explicit per-session opt-in, verified Direct chat route, never inside a child.
+    delegation: !!(
+      session.delegation &&
+      session.harness === "direct" &&
+      !session.taskId
+    ),
     html: true,
   };
 }
+export const DELEGATION_WARNING =
+  "Tool-driven delegation is experimental: it is enabled for this Direct chat session and has not been qualified with a live model.";
 export function resolveSkills(data, session) {
   const ids = new Set([
     ...(session.hookIds || []),
@@ -82,6 +89,11 @@ export function resolveSkills(data, session) {
   const caps = capabilities(session),
     warnings = [],
     skills = [];
+  if (caps.delegation) warnings.push(DELEGATION_WARNING);
+  else if (session.delegation)
+    warnings.push(
+      "Delegation was requested but is unavailable on this route. Direct chat only; native harness delegation is not supported.",
+    );
   for (const id of ids) {
     const skill = data.hooks.find((s) => s.id === id);
     if (!skill) {

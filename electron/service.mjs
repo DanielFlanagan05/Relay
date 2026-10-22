@@ -23,6 +23,7 @@ import {
   json,
 } from "./discovery.mjs";
 import { TaskCoordinator } from "./tasks.mjs";
+import { DelegationEngine, LIMITS as delegationLimits } from "./delegation.mjs";
 import { ArtifactStore, extractArtifacts } from "./artifacts.mjs";
 import { resolveSkills, saveSkill, bundledSkills } from "./skills.mjs";
 import { effectivePrompt, runCLI, runDirect } from "./adapters.mjs";
@@ -43,6 +44,7 @@ export class AgentService extends EventEmitter {
     this.directory = directory;
     this.artifacts = new ArtifactStore(directory);
     this.tasks = new TaskCoordinator(this);
+    this.delegation = new DelegationEngine(this);
     this.memorySource = memorySource;
     this.runtimeSource = runtimeSource;
     this.runner = runner;
@@ -64,6 +66,7 @@ export class AgentService extends EventEmitter {
     this.timer = setInterval(() => {
       if (!this.closed) {
         this.tasks.enforceDeadlines();
+        this.delegation.enforceBudgets();
         this.scheduler.pump();
       }
     }, 3000);
@@ -191,6 +194,23 @@ export class AgentService extends EventEmitter {
         if (!this.closed) this.emit("changed", this.snapshot());
       }, 70);
   }
+  /** Tool-driven delegation is opt-in and limited to the verified Direct chat route. */
+  delegationGate({ harness, taskId, busy = false }, requested) {
+    if (!requested) return false;
+    if (taskId)
+      throw new Error(
+        "A delegated child cannot delegate. Its own children would be untracked.",
+      );
+    if (harness !== "direct")
+      throw new Error(
+        "Tool-driven delegation is currently supported only on Direct chat endpoints. Native harness delegation is not verified; use the Delegate action there.",
+      );
+    if (busy)
+      throw new Error(
+        "Stop the current turn before changing delegation for this session",
+      );
+    return true;
+  }
   create(input) {
     this.validatePair(input.modelId, input.harness);
     if (
@@ -202,7 +222,13 @@ export class AgentService extends EventEmitter {
       throw new Error(
         "Hermes requires workspace write access; choose another harness for read-only work",
       );
-    const s = this.store.create(input);
+    const s = this.store.create({
+      ...input,
+      delegation: this.delegationGate(
+        { harness: input.harness || "direct" },
+        input.delegation,
+      ),
+    });
     this.changed();
     return s.id;
   }
@@ -272,11 +298,24 @@ export class AgentService extends EventEmitter {
       (patch.permission || s.permission) !== "workspace-write"
     )
       throw new Error("Hermes does not support read-only work");
+    if ("delegation" in patch)
+      patch.delegation = this.delegationGate(
+        {
+          harness: patch.harness || s.harness,
+          taskId: s.taskId,
+          busy,
+        },
+        patch.delegation,
+      );
     Object.assign(s, patch, { updatedAt: now() });
     this.changed(true);
   }
   send(sid, text, internal = {}) {
     const s = this.store.session(sid);
+    if (this.delegation.openRound(sid))
+      throw new Error(
+        "This agent is waiting on delegated tasks. Stop the agent to take over the turn.",
+      );
     if (s.taskId && internal.taskId !== s.taskId)
       throw new Error(
         "Child tasks are read-only records. Fork a child to continue independently.",
@@ -341,10 +380,13 @@ export class AgentService extends EventEmitter {
   }
   fail(s, answer, error) {
     const aborted = error.name === "AbortError";
+    // A stopped or failed parent must not leave children holding slots.
+    this.delegation?.abortFor(s);
     s.status = aborted ? "stopped" : "error";
     s.queueReason = "";
     s.error = aborted ? "" : String(error.message).slice(0, 8000);
     answer.status = aborted ? "stopped" : "error";
+    s.updatedAt = now();
     this.changed(true);
   }
   async execute(job) {
@@ -352,7 +394,16 @@ export class AgentService extends EventEmitter {
       model = this.store.model(job.modelId);
     const answer = s.messages.find((m) => m.id === job.answerId);
     const started = Date.now();
-    this.tasks.started(s.id);
+    // A continuation reuses the existing answer; it never starts a new turn.
+    if (!job.roundId) this.tasks.started(s.id);
+    const round = job.roundId
+      ? this.delegation.find(job.roundId)
+      : this.delegation.begin({ session: s, answer, prompt: job.prompt });
+    if (job.roundId && !round)
+      throw new Error(
+        "The delegation this turn was waiting on no longer exists",
+      );
+    if (round) round.resumedAt = now();
     s.error = "";
     s.queueReason = "";
     s.status = model.managed ? "loading" : "running";
@@ -370,6 +421,7 @@ export class AgentService extends EventEmitter {
         answer.content += event.value;
       }
       if (event.type === "thinking") answer.thinking += event.value;
+      // Tool events are display data only; execution happens in the engine.
       if (event.type === "tool") {
         answer.tools.push({ ...event.value, at: now() });
         if (answer.tools.length > 250) answer.tools.shift();
@@ -407,18 +459,68 @@ export class AgentService extends EventEmitter {
       s.status = "running";
       this.changed(true);
       const run = this.runner || (s.harness === "direct" ? runDirect : runCLI);
-      await run({
-        session: s,
-        model,
-        prompt: job.prompt,
-        directory: this.directory,
-        signal: job.controller.signal,
-        emit,
-        apiKey: this.secret(model.id),
-      });
+      for (;;) {
+        // Rounds, tool calls and elapsed time are all capped; the last round
+        // deliberately carries no tools so the answer can only summarize.
+        const budget =
+          !round ||
+          (!round.final &&
+            round.round < delegationLimits.rounds &&
+            round.calls < delegationLimits.callsTotal);
+        const outcome = await run({
+          session: s,
+          model,
+          prompt: round ? round.prompt : job.prompt,
+          ...(round
+            ? {
+                messages: this.delegation.conversation(round, answer),
+                tools: budget ? this.delegation.specs : [],
+              }
+            : {}),
+          directory: this.directory,
+          signal: job.controller.signal,
+          emit,
+          apiKey: this.secret(model.id),
+        });
+        if (!round) {
+          // Delegation is off for this session: unsolicited tool calls from the
+          // endpoint are inert, never an action.
+          if (outcome?.toolCalls?.length)
+            emit({
+              type: "diagnostic",
+              value:
+                "The endpoint returned tool calls but delegation is disabled for this session. Nothing was executed.",
+            });
+          break;
+        }
+        const actions = this.delegation.compile({
+          round,
+          session: s,
+          outcome,
+          emit,
+          deny: !budget,
+        });
+        const { parked } = await this.delegation.run({
+          round,
+          session: s,
+          actions,
+          emit,
+        });
+        // Parked: this job ends here, the scheduler slot is released, and a
+        // continuation job resumes the same answer once the children settle.
+        if (parked) {
+          round.round += 1;
+          this.changed(true);
+          return;
+        }
+        if (!budget || !actions.length) break;
+        round.round += 1;
+      }
+      if (round) this.delegation.finish(round, "complete");
       job.controller.signal.throwIfAborted();
       s.status = "idle";
       answer.status = "complete";
+      s.updatedAt = now();
       if (job.outputFormat !== "markdown") {
         const parsed = extractArtifacts(answer.content);
         answer.artifacts = [];
@@ -552,8 +654,28 @@ export class AgentService extends EventEmitter {
     throw new Error("Model startup exceeded 30 minutes. Inspect runtime.log.");
   }
   cancel(sid) {
-    const queued = this.scheduler.cancel(sid);
     const s = this.store.session(sid);
+    // A parked parent has no job to abort: retire its round and descendants.
+    const parked = this.delegation.pendingRound(sid);
+    if (parked) {
+      this.delegation.retire(
+        parked,
+        "canceled",
+        "The parent session was stopped with Stop task and children.",
+      );
+      if (
+        !this.scheduler.active.has(sid) &&
+        !this.scheduler.pending.some((j) => j.sessionId === sid)
+      ) {
+        const answer = s.messages.find((m) => m.id === parked.parentAnswerId);
+        if (answer && answer.status === "streaming") answer.status = "stopped";
+        s.status = "stopped";
+        s.queueReason = "";
+        s.error = "";
+        this.changed(true);
+      }
+    }
+    const queued = this.scheduler.cancel(sid);
     if (queued)
       this.fail(
         s,
@@ -567,6 +689,7 @@ export class AgentService extends EventEmitter {
     const s = this.store.session(sid);
     const fork = this.store.create({
       title: `${s.title} · fork`,
+      delegation: false,
       modelId: s.modelId,
       harness: s.harness,
       cwd: s.cwd,

@@ -71,6 +71,9 @@ const sessionPatch = z
     disabledNextTurnHookIds: z.array(text).max(30).optional(),
     outputFormat: z.enum(["auto", "markdown", "html"]).optional(),
     draft: z.string().max(200000).optional(),
+    // Experimental, per-session opt-in. Direct chat only; the backend rejects
+    // every other route rather than pretending a native harness is bridged.
+    delegation: z.boolean().optional(),
   })
   .strict();
 const schemas = {
@@ -86,6 +89,7 @@ const schemas = {
       hookIds: z.array(text).max(30).optional(),
       permission: z.enum(["read-only", "workspace-write"]).optional(),
       preset: z.enum(["chat", "implement", "review", "plan"]).optional(),
+      delegation: z.boolean().optional(),
     })
     .strict(),
   updateSession: z.object({ sid, patch: sessionPatch }).strict(),

@@ -84,7 +84,10 @@ const basename = (p: string) =>
   p.split("/").filter(Boolean).at(-1) || "No workspace";
 const cx = (...v: (string | false | undefined)[]) =>
   v.filter(Boolean).join(" ");
-const modKey = platformModKey(navigator.platform || "", navigator.userAgent || "");
+const modKey = platformModKey(
+  navigator.platform || "",
+  navigator.userAgent || "",
+);
 const PANEL_TABS = ["details", "artifacts", "agents"];
 const formatTool = (value: unknown) =>
   typeof value === "string" ? value : JSON.stringify(value, null, 2);
@@ -341,19 +344,26 @@ export function App() {
   const session = data?.sessions.find((s) => s.id === selected);
   const model = data?.models.find((m) => m.id === session?.modelId);
   const active = data?.sessions.filter(busy).length || 0;
+  const [documentVisible, setDocumentVisible] = useState(!document.hidden);
+  useEffect(() => {
+    const update = () => setDocumentVisible(!document.hidden);
+    document.addEventListener("visibilitychange", update);
+    return () => document.removeEventListener("visibilitychange", update);
+  }, []);
+  const visibleSessionId =
+    view === "sessions" && !board && documentVisible ? selected : null;
   useEffect(() => {
     // First snapshot: treat everything as read so old sessions do not all
     // arrive flagged as unread.
     if (data && readState === null) setReadState(seedReadState(data.sessions));
   }, [data, readState]);
   useEffect(() => {
-    if (!session) return;
+    if (!session || visibleSessionId !== session.id) return;
     const at = session.updatedAt;
-    setReadState(
-      (r) =>
-        r && r[session.id] === at ? r : { ...(r || {}), [session.id]: at },
+    setReadState((r) =>
+      r && r[session.id] === at ? r : { ...(r || {}), [session.id]: at },
     );
-  }, [session?.id, session?.updatedAt]);
+  }, [session?.id, session?.updatedAt, visibleSessionId]);
   const filtered = useMemo(
     () =>
       filterSessions(data?.sessions || [], {
@@ -361,10 +371,17 @@ export function App() {
         search,
         activityFilter,
         readState: readState || {},
-        selectedId: selected,
+        selectedId: visibleSessionId,
         busy,
       }),
-    [data?.sessions, showArchive, search, activityFilter, readState, selected],
+    [
+      data?.sessions,
+      showArchive,
+      search,
+      activityFilter,
+      readState,
+      visibleSessionId,
+    ],
   );
   const workspaceGroups = useMemo(() => groupByWorkspace(filtered), [filtered]);
   const open = (sid: string) => {
@@ -511,7 +528,10 @@ export function App() {
           {workspaceGroups.map((group) => {
             const collapsed = !!collapsedGroups[group.cwd];
             return (
-              <div className="workspace-group" key={group.cwd || "no-workspace"}>
+              <div
+                className="workspace-group"
+                key={group.cwd || "no-workspace"}
+              >
                 <button
                   className="workspace-group-heading"
                   aria-expanded={!collapsed}
@@ -525,7 +545,9 @@ export function App() {
                 >
                   <ChevronDown
                     size={11}
-                    className={collapsed ? "group-chevron collapsed" : "group-chevron"}
+                    className={
+                      collapsed ? "group-chevron collapsed" : "group-chevron"
+                    }
                   />
                   <Folder size={11} />
                   <strong>{basename(group.cwd)}</strong>
@@ -542,7 +564,8 @@ export function App() {
                             view === "sessions" &&
                             !board &&
                             "active",
-                          isUnread(s, readState || {}, selected) && "unread",
+                          isUnread(s, readState || {}, visibleSessionId) &&
+                            "unread",
                         )}
                         key={s.id}
                         onClick={() => open(s.id)}
@@ -570,7 +593,7 @@ export function App() {
                             {busy(s) ? s.status : basename(s.cwd)}
                           </span>
                         </span>
-                        {isUnread(s, readState || {}, selected) && (
+                        {isUnread(s, readState || {}, visibleSessionId) && (
                           <span
                             className="unread-dot"
                             aria-label="Unread activity"
@@ -1322,9 +1345,9 @@ function Conversation({
                     className="button"
                     title="Returns your last request to the composer for review. Nothing is sent automatically."
                     onClick={() => {
-                      const lastUser = [
-                        ...session.messages,
-                      ].reverse().find((m) => m.role === "user")?.content;
+                      const lastUser = [...session.messages]
+                        .reverse()
+                        .find((m) => m.role === "user")?.content;
                       setDraft((d) => mergeDraftForRetry(d, lastUser));
                       textarea.current?.focus();
                     }}
@@ -1811,15 +1834,19 @@ function NewSession({
   created: (sid: string) => void;
 }) {
   const eligible = data.models.filter((m) => !m.managed || m.installed);
+  // Reuse the most recently active compatible model and workspace.
+  const recent = [...data.sessions]
+    .filter((s) => !s.archived)
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
   const [mid, setMid] = useState(
-    eligible.find((m) => m.id === data.sessions[0]?.modelId)?.id ||
+    eligible.find((m) => m.id === recent?.modelId)?.id ||
       eligible.find((m) => m.kind === "local" && !m.experimental)?.id ||
       eligible[0]?.id ||
       "",
   );
   const model = data.models.find((m) => m.id === mid);
   const [harness, setHarness] = useState(model?.harness || "direct");
-  const [cwd, setCwd] = useState(data.sessions[0]?.cwd || "");
+  const [cwd, setCwd] = useState(recent?.cwd || "");
   const [preset, setPreset] = useState("chat");
   const [permission, setPermission] =
     useState<Session["permission"]>("read-only");

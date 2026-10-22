@@ -294,7 +294,6 @@ export async function runDirect({
   apiKey,
   tools = [],
   messages,
-  toolArguments,
 }) {
   // A delegation continuation supplies its own transcript so assistant
   // tool_calls and their tool results stay in protocol order. Otherwise the
@@ -305,7 +304,10 @@ export async function runDirect({
   ];
   const size = (entry) =>
     (entry.content?.length || 0) +
-    (entry.tool_calls || []).reduce((n, c) => n + (c.function?.arguments?.length || 0) + 32, 0);
+    (entry.tool_calls || []).reduce(
+      (n, c) => n + (c.function?.arguments?.length || 0) + 32,
+      0,
+    );
   const estimate = Math.ceil(conversation.reduce((n, m) => n + size(m), 0) / 3);
   const maxTokens = Math.min(4096, model.context - estimate - 256);
   if (maxTokens < 256)
@@ -343,9 +345,7 @@ export async function runDirect({
   let sawText = false,
     text = "",
     finishReason = "";
-  const streamed = new ToolCallAccumulator(
-    toolArguments ? { maxArgumentChars: toolArguments } : {},
-  );
+  const streamed = new ToolCallAccumulator();
   for await (const line of lines(response.body)) {
     if (!line.startsWith("data:")) continue;
     const data = line.slice(5).trim();
