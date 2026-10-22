@@ -1,0 +1,8 @@
+node_modules/
+dist/
+release/
+artifacts/
+*.log
+*.tsbuildinfo
+__pycache__/
+*.py[cod]

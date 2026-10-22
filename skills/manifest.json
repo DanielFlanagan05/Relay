@@ -1,0 +1,68 @@
+[
+  {
+    "id": "careful",
+    "name": "Careful engineer",
+    "description": "Small, verified changes",
+    "category": "workflow",
+    "requires": [],
+    "revision": 1
+  },
+  {
+    "id": "concise",
+    "name": "Keep it concise",
+    "description": "Terse responses, useful detail",
+    "category": "style",
+    "requires": [],
+    "revision": 1
+  },
+  {
+    "id": "plan",
+    "name": "Plan first",
+    "description": "Understand before implementing",
+    "category": "workflow",
+    "requires": [],
+    "revision": 1
+  },
+  {
+    "id": "review",
+    "name": "Code review",
+    "description": "Actionable findings with evidence",
+    "category": "workflow",
+    "requires": [],
+    "revision": 1
+  },
+  {
+    "id": "verify",
+    "name": "Verify and report",
+    "description": "Checks proportional to the change",
+    "category": "workflow",
+    "requires": [],
+    "revision": 1
+  },
+  {
+    "id": "handoff",
+    "name": "Context handoff",
+    "description": "Preserve the decisions and next steps",
+    "category": "workflow",
+    "requires": [],
+    "revision": 1
+  },
+  {
+    "id": "subagents",
+    "name": "Use subagents",
+    "description": "Bounded, tracked delegation",
+    "category": "workflow",
+    "requires": [
+      "delegation"
+    ],
+    "revision": 1
+  },
+  {
+    "id": "html-output",
+    "name": "HTML/CSS output",
+    "description": "Self-contained formatted artifacts",
+    "category": "output",
+    "requires": [],
+    "revision": 1
+  }
+]
