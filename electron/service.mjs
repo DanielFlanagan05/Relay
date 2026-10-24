@@ -6,9 +6,12 @@ import {
   closeSync,
   statSync,
   writeFileSync,
+  appendFileSync,
+  readFileSync,
   renameSync,
   rmSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Store, id, now } from "./store.mjs";
@@ -27,6 +30,13 @@ import { DelegationEngine, LIMITS as delegationLimits } from "./delegation.mjs";
 import { ArtifactStore, extractArtifacts } from "./artifacts.mjs";
 import { resolveSkills, saveSkill, bundledSkills } from "./skills.mjs";
 import { effectivePrompt, runCLI, runDirect } from "./adapters.mjs";
+import { PiCommands } from "./piCommands.mjs";
+import {
+  normalizeUsage,
+  addUsage,
+  finalizeRate,
+  estimateOutputTokens,
+} from "./usage.mjs";
 
 export class AgentService extends EventEmitter {
   constructor(
@@ -37,11 +47,16 @@ export class AgentService extends EventEmitter {
       runner,
       secret = () => undefined,
       localaiRoot = "",
+      commandCatalog,
     } = {},
   ) {
     super();
     this.store = new Store(directory);
     this.directory = directory;
+    this.commandCatalog = commandCatalog;
+    // Native slash-command execution. Pi commands run over Pi's own RPC
+    // control interface (piControl.mjs), never through the prompt path.
+    this.commands = new PiCommands({ service: this });
     this.artifacts = new ArtifactStore(directory);
     this.tasks = new TaskCoordinator(this);
     this.delegation = new DelegationEngine(this);
@@ -56,6 +71,15 @@ export class AgentService extends EventEmitter {
     if (!d.settings.localaiRoot && localaiRoot)
       d.settings.localaiRoot = localaiRoot;
     if (!d.models.length) this.refreshModels();
+    else
+      for (const imported of importLocalModels(d.settings.localaiRoot)) {
+        const existing = d.models.find((m) => m.id === imported.id);
+        if (existing)
+          Object.assign(existing, {
+            baselineParallel: imported.baselineParallel,
+            estimatedGiB: imported.estimatedGiB,
+          });
+      }
     this.scheduler = new Scheduler({
       inspect: (mid) => this.pool(mid),
       memory: memorySource,
@@ -80,6 +104,8 @@ export class AgentService extends EventEmitter {
       else
         Object.assign(existing, {
           installed: model.installed,
+          baselineParallel: model.baselineParallel,
+          estimatedGiB: model.estimatedGiB,
           name: model.name,
           description: model.description,
         });
@@ -128,10 +154,26 @@ export class AgentService extends EventEmitter {
       m.kind === "cloud" ? this.store.data.settings.cloudParallel : m.parallel;
     if (m.managed && runtime?.profile === m.profile)
       parallel = Math.min(parallel, runtime.profile_settings?.sessions || 1);
+    // Match the controller's startup footprint; resident weights are never charged twice.
+    const startupGiB =
+      m.managed && !runtime && m.estimatedGiB > 0 && m.baselineParallel
+        ? m.estimatedGiB +
+          Math.max(0, m.parallel - m.baselineParallel) * m.slotGiB +
+          this.store.data.settings.reserveGiB
+        : undefined;
+    const available =
+      startupGiB === undefined ? undefined : this.memorySource().availableGiB;
+    const startupBlocked =
+      startupGiB !== undefined &&
+      (!Number.isFinite(available) || available < startupGiB)
+        ? `Startup needs approximately ${startupGiB.toFixed(1)} GiB including the ${this.store.data.settings.reserveGiB} GiB system reserve; ${Number.isFinite(available) ? available.toFixed(1) + " GiB available" : "memory telemetry unavailable"}. Free memory or configure fewer slots.`
+        : "";
     return {
       key: m.id,
+      startupGiB,
       parallel,
       local: m.kind === "local",
+      resident: !!(m.managed && runtime?.profile === m.profile),
       slotGiB: m.slotGiB || 0,
       blocked:
         m.managed && this.unloading
@@ -140,7 +182,7 @@ export class AgentService extends EventEmitter {
             ? `${other.profile} is using the managed runtime slot. This profile will wait.`
             : m.managed && runtime && runtime.profile !== m.profile
               ? `${runtime.profile} is loaded. Finish its work and unload it in Compute to switch models.`
-              : "",
+              : startupBlocked,
     };
   }
   snapshot() {
@@ -310,6 +352,12 @@ export class AgentService extends EventEmitter {
     Object.assign(s, patch, { updatedAt: now() });
     this.changed(true);
   }
+  // Native harness slash commands (phase 2). Pi commands execute over Pi's
+  // own RPC control interface; every other route keeps the explicit
+  // refusal. Outcomes are recorded on the session, never as chat messages.
+  runCommand(sid, name, args = "") {
+    return this.commands.run(sid, name, args);
+  }
   send(sid, text, internal = {}) {
     const s = this.store.session(sid);
     if (this.delegation.openRound(sid))
@@ -385,15 +433,53 @@ export class AgentService extends EventEmitter {
     s.status = aborted ? "stopped" : "error";
     s.queueReason = "";
     s.error = aborted ? "" : String(error.message).slice(0, 8000);
+    if (!aborted) this.logUnnaturalStop(s, error);
     answer.status = aborted ? "stopped" : "error";
     s.updatedAt = now();
     this.changed(true);
   }
+  // Every non-user stop is recorded with the runtime's own stop reason, so
+  // "Connection error." can be traced to its cause (e.g. memory reserve exhausted).
+  logUnnaturalStop(s, error) {
+    let runtime = null;
+    try {
+      const file = join(
+        process.env.XDG_STATE_HOME || join(homedir(), ".local/state"),
+        "localai/stop-events.jsonl",
+      );
+      const last = readFileSync(file, "utf8").trim().split("\n").pop();
+      const event = JSON.parse(last);
+      // Only blame the runtime for a stop that happened shortly before.
+      if (Date.now() - Date.parse(event.time) < 10 * 60 * 1000) runtime = event;
+    } catch {}
+    if (runtime && !runtime.natural)
+      s.error = `${s.error}\nRuntime stopped: ${runtime.cause}.`.slice(0, 8000);
+    try {
+      appendFileSync(
+        join(this.directory, "agent-stops.log"),
+        JSON.stringify({
+          time: new Date().toISOString(),
+          session: s.title,
+          sessionId: s.id,
+          error: String(error.message).slice(0, 500),
+          runtime,
+        }) + "\n",
+        { mode: 0o600 },
+      );
+    } catch {}
+  }
   async execute(job) {
+    // A native slash-command control job (Pi /compact) holds an inference
+    // slot but has no answer message; it runs through PiCommands instead of
+    // the turn pipeline below.
+    if (job.control) return job.run();
     const s = this.store.session(job.sessionId),
       model = this.store.model(job.modelId);
     const answer = s.messages.find((m) => m.id === job.answerId);
     const started = Date.now();
+    // A parked continuation reuses this answer, so elapsed time accumulates
+    // across execution segments and never counts the queued wait between them.
+    const baseMs = answer.elapsedMs || 0;
     // A continuation reuses the existing answer; it never starts a new turn.
     if (!job.roundId) this.tasks.started(s.id);
     const round = job.roundId
@@ -408,8 +494,22 @@ export class AgentService extends EventEmitter {
     s.queueReason = "";
     s.status = model.managed ? "loading" : "running";
     this.changed(true);
-    let lastSave = Date.now(),
-      firstText = 0;
+    let lastSave = Date.now();
+    let generationStarted = 0;
+    const baseActiveMs = answer.activeMs || 0;
+    const updateTiming = () => {
+      answer.elapsedMs = baseMs + Date.now() - started;
+      answer.activeMs =
+        baseActiveMs + (generationStarted ? Date.now() - generationStarted : 0);
+      const rate = finalizeRate({
+        turnOutput: answer.turnUsage?.output,
+        generatedText: answer.content + answer.thinking,
+        elapsedMs: answer.activeMs,
+      });
+      answer.tokensPerSecond = rate.rate || 0;
+      answer.estimatedRate = rate.estimated || false;
+      answer.rateKind = "turn-throughput";
+    };
     const emit = (event) => {
       if (job.controller.signal.aborted) return;
       if (event.type === "remoteId") {
@@ -417,7 +517,6 @@ export class AgentService extends EventEmitter {
         this.store.save();
       }
       if (event.type === "delta") {
-        if (!firstText) firstText = Date.now();
         answer.content += event.value;
       }
       if (event.type === "thinking") answer.thinking += event.value;
@@ -426,6 +525,10 @@ export class AgentService extends EventEmitter {
         answer.tools.push({ ...event.value, at: now() });
         if (answer.tools.length > 250) answer.tools.shift();
       }
+      if (event.type === "compaction") {
+        s.compaction = { status: event.value, at: now() };
+        this.store.save();
+      }
       if (event.type === "diagnostic") {
         answer.tools.push({
           name: "Provider notice",
@@ -433,18 +536,19 @@ export class AgentService extends EventEmitter {
           at: now(),
         });
       }
-      if (event.type === "usage")
-        answer.usage = {
-          input: event.value?.input || 0,
-          output: event.value?.output || 0,
-        };
-      answer.elapsedMs = Date.now() - started;
-      answer.tokensPerSecond =
-        firstText && Date.now() > firstText + 250
-          ? (answer.usage?.output || Math.ceil(answer.content.length / 4)) /
-            ((Date.now() - firstText) / 1000)
-          : 0;
-      answer.estimatedRate = !answer.usage?.output;
+      if (event.type === "usage") {
+        const usage = normalizeUsage(event.value);
+        if (usage) {
+          // usage = this provider request (context occupancy on input);
+          // turnUsage = cumulative across every request in the turn.
+          answer.usage = usage;
+          answer.turnUsage = addUsage(answer.turnUsage, usage);
+          answer.usageReports = (answer.usageReports || 0) + 1;
+          if (usage.scope === "request")
+            answer.requests = (answer.requests || 0) + 1;
+        }
+      }
+      updateTiming();
       if (Date.now() - lastSave > 700) {
         this.store.save();
         lastSave = Date.now();
@@ -457,6 +561,7 @@ export class AgentService extends EventEmitter {
         await this.ensureRuntime(model, job.controller.signal);
       job.controller.signal.throwIfAborted();
       s.status = "running";
+      generationStarted = Date.now();
       this.changed(true);
       const run = this.runner || (s.harness === "direct" ? runDirect : runCLI);
       for (;;) {
@@ -510,6 +615,7 @@ export class AgentService extends EventEmitter {
         // continuation job resumes the same answer once the children settle.
         if (parked) {
           round.round += 1;
+          updateTiming();
           this.changed(true);
           return;
         }
@@ -535,10 +641,11 @@ export class AgentService extends EventEmitter {
           }
         }
       }
-      answer.elapsedMs = Date.now() - started;
+      updateTiming();
       this.emit("completed", { sessionId: s.id, title: s.title });
       this.changed(true);
     } catch (error) {
+      updateTiming();
       this.fail(s, answer, error);
     }
   }
@@ -586,6 +693,8 @@ export class AgentService extends EventEmitter {
         String(model.parallel),
         "--slot-gib",
         String(model.slotGiB),
+        "--reserve-gib",
+        String(this.store.data.settings.reserveGiB),
       ],
       { detached: true, stdio: ["ignore", log, log], env: process.env },
     );
@@ -694,6 +803,7 @@ export class AgentService extends EventEmitter {
       harness: s.harness,
       cwd: s.cwd,
       hookIds: [...s.hookIds],
+      thinking: s.thinking,
       parentId: sid,
     });
     fork.messages = structuredClone(
@@ -711,6 +821,7 @@ export class AgentService extends EventEmitter {
       harness: s.harness,
       cwd: s.cwd,
       hookIds: [...s.hookIds],
+      thinking: s.thinking,
       parentId: sid,
     });
     next.permission = s.permission;

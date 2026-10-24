@@ -1369,6 +1369,95 @@ summary > svg:last-child {
   gap: 5px;
   align-items: center;
 }
+/* Session context usage: its own row directly above the composer box,
+   right-aligned, wrapping instead of overlapping at narrow widths or 200% zoom. */
+.context-usage-row {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 0 4px 5px;
+}
+.context-usage {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 9px;
+  line-height: 1.4;
+  color: #8f829f;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.context-usage.estimated {
+  color: #9a8f76;
+}
+.context-usage.unavailable {
+  color: #66636f;
+}
+.context-usage.stale {
+  opacity: 0.68;
+  font-style: italic;
+}
+.context-usage-meter {
+  width: 38px;
+  height: 4px;
+  border-radius: 2px;
+  background: #2c2934;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.context-usage-meter > span {
+  display: block;
+  height: 100%;
+  background: #b9a1ed;
+  border-radius: 2px;
+}
+.context-compaction-slot:not(:empty) {
+  display: inline-flex;
+}
+.context-compaction {
+  font-size: 9px;
+  line-height: 1.4;
+  padding: 2px 8px;
+  border-radius: 5px;
+  white-space: nowrap;
+}
+.context-compaction.running {
+  color: #ddc2e4;
+  background: #3c3042;
+  border: 1px solid #614a67;
+}
+.context-compaction.done {
+  color: #b5a2d8;
+  background: #b8a0fb14;
+}
+.context-compaction.failed {
+  color: #e3b3b3;
+  background: #5c2f2f33;
+}
+[data-theme="light"] .context-usage {
+  color: #6f6580;
+}
+[data-theme="light"] .context-usage.estimated {
+  color: #7d7158;
+}
+[data-theme="light"] .context-usage-meter {
+  background: #e4e0ea;
+}
+[data-theme="light"] .context-compaction.running {
+  color: #5c3f6e;
+  background: #efe3f6;
+  border-color: #c1a5d1;
+}
+[data-theme="light"] .context-compaction.done {
+  color: #6d4084;
+  background: #f2e8f9;
+}
+[data-theme="light"] .context-compaction.failed {
+  color: #8c3f3f;
+  background: #f7e4e4;
+}
 .inspector {
   width: 249px;
   flex-shrink: 0;
@@ -3447,4 +3536,322 @@ html[data-theme="light"] .session-row.unread .session-state {
     --muted: #4f4557;
     --faint: #5d5266;
   }
+}
+
+/* ── Local compute: system-wide process memory graph ───────────────────── */
+.proc-panel {
+  margin: 36px 0 5px;
+}
+.proc-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 11px;
+}
+.proc-headings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 15px;
+  margin-right: auto;
+  font-size: 10px;
+  color: var(--muted);
+}
+.proc-headings strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+.proc-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--faint);
+}
+.proc-search input,
+.proc-toolbar select {
+  font-size: 10px;
+  padding: 8px 10px;
+}
+.proc-search input {
+  width: 168px;
+}
+.proc-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  font-size: 9px;
+  color: var(--muted);
+  margin-bottom: 11px;
+}
+.proc-notice {
+  font-size: 9px;
+  line-height: 1.75;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 10px 12px;
+  margin-bottom: 13px;
+  max-width: 860px;
+}
+.proc-notice.warn {
+  color: #bba277;
+  border-color: #bba27726;
+  background: #bba2770c;
+}
+.proc-notice.error {
+  color: #d18b8b;
+  border-color: #d18b8b26;
+  background: #d18b8b0c;
+}
+.proc-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 460px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.proc-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 190px) 62px 1fr 84px;
+  gap: 11px;
+  align-items: center;
+  padding: 7px 13px;
+  border-bottom: 1px solid #ffffff08;
+}
+.proc-row:last-child {
+  border-bottom: 0;
+}
+.proc-row:hover {
+  background: var(--hover);
+}
+.proc-name {
+  font-size: 10px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.proc-pid,
+.proc-value {
+  font-size: 9px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.proc-value {
+  text-align: right;
+  color: var(--text);
+}
+.proc-bar {
+  height: 7px;
+  border-radius: 4px;
+  background: #ffffff0a;
+  overflow: hidden;
+}
+.proc-fill {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #8f7bd8, var(--accent));
+}
+.proc-fill.foreign {
+  background: #5a5b66;
+}
+.proc-empty {
+  padding: 16px;
+  font-size: 10px;
+  color: var(--muted);
+}
+.proc-note {
+  font-size: 8px;
+  color: var(--faint);
+  line-height: 1.8;
+  margin-top: 10px;
+  max-width: 860px;
+}
+.violet-tag {
+  font-size: 8px;
+  color: #a795d8;
+  border-color: #a795d826;
+  background: #a795d80c;
+}
+.proc-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+html[data-theme="light"] .proc-list {
+  background: #fff;
+}
+html[data-theme="light"] .proc-row {
+  border-bottom-color: #00000010;
+}
+html[data-theme="light"] .proc-bar {
+  background: #00000010;
+}
+@media (prefers-reduced-motion: reduce) {
+  .proc-fill {
+    transition: none;
+  }
+}
+/* Agent B: truthful lifecycle states + the experimental delegation switch.
+   Colour is never the only signal: every state also has its own text label. */
+.state-label.waiting_children > span {
+  background: var(--accent);
+}
+.state-label.stopped > span,
+.state-label.interrupted > span {
+  background: var(--amber);
+}
+.state-label.failed > span {
+  background: #d18b8b;
+}
+.state-label.unknown > span {
+  background: #777c86;
+}
+.queue-notice strong {
+  font-weight: 600;
+}
+.delegation-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.delegation-toggle em {
+  font-style: normal;
+  font-size: 8px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.7;
+  margin-left: 4px;
+}
+.delegation-toggle.on {
+  color: var(--accent);
+}
+.delegation-toggle.locked {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+@media (prefers-reduced-motion: reduce) {
+  .queue-notice .spin {
+    animation: none;
+  }
+}
+
+/* Native harness slash-command suggestions (round 3, phase 1). The popover is
+   anchored inside the composer box; only .slash-suggest* classes are new. */
+.composer {
+  position: relative;
+}
+.slash-suggest {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 30;
+  background: var(--surface);
+  border: 1px solid #3b3746;
+  border-radius: 10px;
+  box-shadow: 0 8px 26px #00000040;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px;
+}
+.slash-suggest-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 8px;
+  color: #8f829f;
+  padding: 4px 8px 6px;
+  border-bottom: 1px solid #2c2937;
+  margin-bottom: 4px;
+}
+.slash-suggest-refresh {
+  border: 1px solid #3b3746;
+  background: transparent;
+  color: #b4a4cb;
+  border-radius: 6px;
+  font-size: 8px;
+  padding: 2px 7px;
+  flex-shrink: 0;
+}
+.slash-suggest-option {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 6px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.slash-suggest-option.active {
+  background: #2a2733;
+}
+.slash-suggest-name {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 10px;
+  color: #c8bfe0;
+  white-space: nowrap;
+}
+.slash-suggest-args {
+  font-size: 8px;
+  color: #66636f;
+  white-space: nowrap;
+}
+.slash-suggest-desc {
+  font-size: 9px;
+  color: #a7a3b3;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.slash-suggest-hint {
+  font-size: 8px;
+  color: #a79abf;
+  padding: 6px 8px;
+}
+/* Native slash-command outcomes (phase 2). Deliberately a discreet system
+   line in the transcript: the outcome was produced by the harness control
+   interface, not by the model. */
+.command-outcome {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 8px 0;
+  padding: 7px 11px;
+  border: 1px solid #35323d;
+  border-left: 3px solid #7a6cc9;
+  border-radius: 8px;
+  background: #1b1a20;
+  color: #c8c3d6;
+  font-size: 11px;
+  line-height: 1.45;
+}
+.command-outcome.failed {
+  border-left-color: #c96f6f;
+  color: #d8bcbc;
+}
+.command-outcome time {
+  margin-left: auto;
+  color: #6f6b7a;
+  font-size: 9px;
+  white-space: nowrap;
 }

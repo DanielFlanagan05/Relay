@@ -122,6 +122,48 @@ test("headroom charges per-session cache, not the large weights a second time", 
   service.cancel(a);
 });
 
+test("turns on a resident managed runtime are not charged KV headroom again", async (t) => {
+  let runtime = null,
+    count = 0;
+  const releases = [];
+  const service = serviceFixture(
+    t,
+    async () => {
+      count++;
+      await new Promise((r) => releases.push(r));
+    },
+    {
+      // The loaded weights and preallocated cache already reduced MemAvailable.
+      memorySource: () => ({ availableGiB: 10.9 }),
+      runtimeSource: () => runtime,
+    },
+  );
+  Object.assign(service.store.data.models[0], {
+    managed: true,
+    profile: "flash",
+    installed: true,
+    parallel: 1,
+    baselineParallel: 1,
+    estimatedGiB: 103,
+  });
+  const a = service.create({ modelId: model().id, harness: "direct" });
+  service.send(a, "before load");
+  await tick();
+  assert.equal(count, 0, "a cold start still needs startup headroom");
+  assert.match(service.store.session(a).queueReason, /Startup needs/);
+  runtime = { profile: "flash", profile_settings: { sessions: 1 } };
+  service.scheduler.pump();
+  await until(() => count === 1);
+  const b = service.create({ modelId: model().id, harness: "direct" });
+  service.send(b, "second");
+  await tick();
+  assert.match(service.store.session(b).queueReason, /slots are busy/);
+  releases[0]();
+  await until(() => count === 2);
+  releases[1]();
+  await until(() => service.scheduler.active.size === 0);
+});
+
 test("a blocked local pool does not block cloud; pause leaves active work alone", async (t) => {
   const starts = [];
   const finishes = [];
@@ -468,6 +510,33 @@ test("normalizes installed Pi, Codex, Claude, Hermes, and OpenCode event forms",
   );
 });
 
+test("Pi compaction events map to running, done and failed", () => {
+  const status = (event) =>
+    normalize("pi", event).find((e) => e.type === "compaction")?.value;
+  assert.equal(
+    status({ type: "compaction_start", reason: "threshold" }),
+    "running",
+  );
+  assert.equal(
+    status({
+      type: "compaction_end",
+      result: { summary: "s" },
+      aborted: false,
+    }),
+    "done",
+  );
+  assert.equal(status({ type: "compaction_end", aborted: true }), "failed");
+  assert.equal(
+    status({
+      type: "compaction_end",
+      result: { summary: "s" },
+      aborted: false,
+      errorMessage: "too large",
+    }),
+    "failed",
+  );
+});
+
 test("real SSE transport restores only its own conversation and includes current instructions", async (t) => {
   let received;
   const server = createServer(async (req, res) => {
@@ -562,6 +631,32 @@ test("subprocess transport streams events, captures native ID, and surfaces prov
   );
 });
 
+test("Pi thinking level passes --thinking only when set, and defaults to no flag", (t) => {
+  const dir = directory(t);
+  const m = model({ managed: true, profile: "gufo-flash" });
+  const base = {
+    id: "00000000-0000-4000-8000-000000000002",
+    harness: "pi",
+    permission: "workspace-write",
+  };
+  const args = (session) =>
+    commandFor(session, m, "hello", dir, (name) => `/synthetic/${name}`).args;
+  assert.ok(!args(base).includes("--thinking"));
+  assert.ok(!args({ ...base, thinking: "default" }).includes("--thinking"));
+  const low = args({ ...base, thinking: "low" });
+  assert.equal(low[low.indexOf("--thinking") + 1], "low");
+  // New sessions keep today's behavior unless a level is chosen.
+  const store = new Store(dir);
+  assert.equal(
+    store.create({ modelId: "x", harness: "pi" }).thinking,
+    "default",
+  );
+  assert.equal(
+    store.create({ modelId: "x", harness: "pi", thinking: "minimal" }).thinking,
+    "minimal",
+  );
+});
+
 test("installed local harness commands select LocalAi configuration instead of account defaults", (t) => {
   const dir = directory(t);
   const m = model({ managed: true, profile: "coding-concurrent" });
@@ -598,13 +693,31 @@ test("installed local harness commands select LocalAi configuration instead of a
   assert.equal(hermes.input, "hello");
 });
 
-test("CLI cancellation waits until the owned process has exited", async t => {
-  const controller = new AbortController(); let pid;
+test("CLI cancellation waits until the owned process has exited", async (t) => {
+  const controller = new AbortController();
+  let pid;
   const script = `process.on('SIGTERM',()=>setTimeout(()=>process.exit(0),80));console.log(JSON.stringify({type:'thread.started',thread_id:String(process.pid)}));console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'ready'}}));setInterval(()=>{},1000);`;
-  await assert.rejects(runCLI({ session: { harness: 'codex', messages: [] }, model: model(), prompt: 'hello', directory: directory(t), signal: controller.signal,
-    emit: event => { if (event.type === 'remoteId') pid = Number(event.value); if (event.type === 'delta') controller.abort(); },
-    commandFactory: () => ({ command: process.execPath, args: ['-e', script], env: process.env }) }), { name: 'AbortError' });
-  assert.ok(pid > 0); assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  await assert.rejects(
+    runCLI({
+      session: { harness: "codex", messages: [] },
+      model: model(),
+      prompt: "hello",
+      directory: directory(t),
+      signal: controller.signal,
+      emit: (event) => {
+        if (event.type === "remoteId") pid = Number(event.value);
+        if (event.type === "delta") controller.abort();
+      },
+      commandFactory: () => ({
+        command: process.execPath,
+        args: ["-e", script],
+        env: process.env,
+      }),
+    }),
+    { name: "AbortError" },
+  );
+  assert.ok(pid > 0);
+  assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
 });
 
 test("direct transport rejects context overflow without silently discarding history", async () => {
@@ -620,4 +733,26 @@ test("direct transport rejects context overflow without silently discarding hist
     }),
     /context window/,
   );
+});
+
+test("managed startup preflight includes extra slots and reserve but not resident weights", async (t) => {
+  let runtime = null;
+  const service = serviceFixture(t, async () => {}, {
+    memorySource: () => ({ availableGiB: 113 }),
+    runtimeSource: () => runtime,
+  });
+  Object.assign(service.store.data.models[0], {
+    managed: true,
+    profile: "fixture",
+    estimatedGiB: 98,
+    baselineParallel: 1,
+    parallel: 3,
+    slotGiB: 4,
+  });
+  const pool = service.pool(model().id);
+  assert.equal(pool.startupGiB, 114);
+  assert.match(pool.blocked, /configure fewer slots/);
+  runtime = { profile: "fixture", profile_settings: { sessions: 3 } };
+  assert.equal(service.pool(model().id).startupGiB, undefined);
+  assert.equal(service.pool(model().id).blocked, "");
 });

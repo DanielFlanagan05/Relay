@@ -1,0 +1,10 @@
+# Agent A token rates
+
+| time (UTC) | phase | prompt tokens | prefill tok/s | generated tokens | decode tok/s | source |
+|---|---|---|---|---|---|---|
+| 2026-10-23 19:10 | exploration | 27,923 | 737.0 | 3,171 | 41.7 | `~/.config/Relay/runtime.log` tail, line `request=r21 event=completed … prompt_tokens=27923 prefill_tokens=1470 … generated_tokens=3171 … prefill_tps=737.0 decode_tps=41.7` (engine rates; prefill rate reflects a cache hit — only 1,470 of 27,923 tokens recomputed). Attribution note: the runtime serves both round-3 agent sessions; r21 is the most recent completed request when this row was written and matches this session's turn size, but per-request attribution between the two sessions is not certain. |
+| 2026-10-23 19:15 | implementation | 48,188 | 391.4 | 227 | 46.9 | `~/.config/Relay/runtime.log` tail, line at 19:15:40 `request=r40 … prompt_tokens=48188 prefill_tokens=220 … generated_tokens=227 … prefill_tps=391.4 decode_tps=46.9`. Caveats: prompt_tokens (48k) is closer to the peer session's size than mine (~30k), so this row may be Agent B's request; prefill_tps covers only 220 recomputed tokens (cache hit) and is not comparable to r21. Attribution between the two shared-runtime sessions is not certain and no extra probe requests were made. |
+| 2026-10-23 19:17 | completion | 51,222 | 144.7 | 144 | 62.5 | `~/.config/Relay/runtime.log` tail, line at 19:16:52 `request=r43 … prompt_tokens=51222 prefill_tokens=37 … generated_tokens=144 … prefill_tps=144.7 decode_tps=62.5`. Caveats as above: same shared runtime serves both round-3 sessions and this row may belong to Agent B; prefill_tps covers only 37 recomputed tokens (near-full cache hit) so it is not a cold-prefill rate. Exact own-session rates: unavailable without probe requests, which the round rules forbid. |
+
+Note: per-request attribution between the two round-3 sessions sharing this runtime is not possible from the log; rows record the most recent completed runtime request at log time, quoted verbatim. No timing was estimated from wall-clock.
+

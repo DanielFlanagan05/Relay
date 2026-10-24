@@ -25,6 +25,15 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(settings['estimated_gib'], 113)  # one 105 GiB footprint, two extra 4 GiB caches
         self.assertEqual(controller.engine_command('large', settings)[-2:], ['--sessions', '3'])
 
+    def test_reserve_override_is_explicit_and_validated(self):
+        controller = FakeController()
+        bridge.configure(controller, 'large', 3, 4, 6)
+        self.assertEqual(controller.profiles()['large']['minimum_free_gib'], 6)
+        self.assertEqual(controller.profiles()['large']['estimated_gib'], 113)
+        for invalid in [1, 129, float('nan')]:
+            with self.assertRaises(ValueError):
+                bridge.configure(FakeController(), 'large', 3, 4, invalid)
+
 
 if __name__ == '__main__':
     unittest.main()

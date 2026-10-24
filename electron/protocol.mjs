@@ -1,3 +1,4 @@
+import { inclusiveInput } from "./usage.mjs";
 import { StringDecoder } from "node:string_decoder";
 
 // Split on LF only: JSON string values can contain Unicode paragraph separators.
@@ -39,10 +40,32 @@ export function normalize(harness, event) {
         output: event.result,
         error: event.isError,
       });
+    if (event.type === "compaction_start") add("compaction", "running");
+    if (event.type === "compaction_end")
+      add(
+        "compaction",
+        event.result && !event.aborted && !event.errorMessage
+          ? "done"
+          : "failed",
+      );
     if (event.type === "message_end" && event.message?.role === "assistant") {
       add("usage", {
-        input: event.message.usage?.input,
+        input: inclusiveInput(
+          event.message.usage?.input,
+          event.message.usage?.cacheRead,
+          event.message.usage?.cacheWrite,
+        ),
+        contextInput: inclusiveInput(
+          event.message.usage?.input,
+          event.message.usage?.cacheRead,
+          event.message.usage?.cacheWrite,
+        ),
+        scope: "request",
+        reasoning: event.message.usage?.reasoning,
         output: event.message.usage?.output,
+        // Passed through only when this harness actually reports them.
+        cacheRead: event.message.usage?.cacheRead,
+        cacheWrite: event.message.usage?.cacheWrite,
       });
       if (["error", "aborted"].includes(event.message.stopReason))
         add("error", event.message.errorMessage || event.message.stopReason);
@@ -69,7 +92,10 @@ export function normalize(harness, event) {
     if (event.type === "turn.completed")
       add("usage", {
         input: event.usage?.input_tokens,
+        scope: "turn",
         output: event.usage?.output_tokens,
+        cacheRead: event.usage?.cached_input_tokens,
+        reasoning: event.usage?.reasoning_output_tokens,
       });
     if (event.type === "error" || event.type === "turn.failed")
       add(
@@ -98,8 +124,15 @@ export function normalize(harness, event) {
         });
       add("fallback", event.result);
       add("usage", {
-        input: event.usage?.input_tokens,
+        input: inclusiveInput(
+          event.usage?.input_tokens,
+          event.usage?.cache_read_input_tokens,
+          event.usage?.cache_creation_input_tokens,
+        ),
+        scope: "turn",
         output: event.usage?.output_tokens,
+        cacheRead: event.usage?.cache_read_input_tokens,
+        cacheWrite: event.usage?.cache_creation_input_tokens,
       });
     }
   } else if (harness === "opencode") {
@@ -114,6 +147,8 @@ export function normalize(harness, event) {
       add("usage", {
         input: event.part?.tokens?.input,
         output: event.part?.tokens?.output,
+        cacheRead: event.part?.tokens?.cache?.read,
+        cacheWrite: event.part?.tokens?.cache?.write,
       });
     if (event.type === "error")
       add(

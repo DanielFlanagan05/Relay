@@ -92,8 +92,9 @@ test("workspace defaults are captured and turn overrides resolve deterministical
 test("editing bundled skills creates a versioned override and leaves the packaged original untouched", () => {
   const data = { hooks: bundledSkills() },
     old = data.hooks.find((s) => s.id === "concise");
+  const oldRevision = old.revision;
   const changed = saveSkill(data, { ...old, content: "My terse instruction" });
-  assert.equal(changed.revision, 2);
+  assert.equal(changed.revision, oldRevision + 1);
   assert.equal(changed.origin, "user");
   assert.equal(changed.bundledId, "concise");
   assert.notEqual(
@@ -111,4 +112,50 @@ test("import parses metadata and warns about missing supporting resources", () =
   assert.equal(s.description, "Checks things");
   assert.equal(s.warnings.length, 1);
   assert.equal(s.content, "Read [guide](references/guide.md).");
+});
+
+test("v2 refreshes bundled revisions and adds native skills without overwriting personal rules or history", (t) => {
+  const dir = directory(t),
+    store = new Store(dir);
+  const concise = store.data.hooks.find((s) => s.id === "concise");
+  concise.revision = 1;
+  concise.content = "Old bundled text";
+  saveSkill(store.data, {
+    ...store.data.hooks.find((s) => s.id === "review"),
+    content: "Personal review",
+  });
+  store.data.hooks = store.data.hooks.filter(
+    (s) => !["local-work", "teamwork"].includes(s.id),
+  );
+  const session = store.create({ modelId: "fixture", harness: "pi" });
+  session.messages.push({
+    role: "user",
+    content: "hi",
+    hookSnapshot: [{ content: "Old bundled text" }],
+  });
+  store.save();
+  const fresh = new Store(dir);
+  assert.equal(fresh.data.hooks.find((s) => s.id === "concise").revision, 2);
+  assert.notEqual(
+    fresh.data.hooks.find((s) => s.id === "concise").content,
+    "Old bundled text",
+  );
+  assert.equal(
+    fresh.data.hooks.find((s) => s.id === "review").content,
+    "Personal review",
+  );
+  assert.equal(
+    fresh.session(session.id).messages[0].hookSnapshot[0].content,
+    "Old bundled text",
+  );
+  const pi = {
+    ...fresh.session(session.id),
+    permission: "workspace-write",
+    hookIds: ["local-work", "teamwork"],
+  };
+  assert.equal(resolveSkills(fresh.data, pi).skills.length, 2);
+  assert.equal(
+    resolveSkills(fresh.data, { ...pi, harness: "direct" }).skills.length,
+    0,
+  );
 });

@@ -1,26 +1,11 @@
-# Agent implementation review — 2026-10-22
+# Three-agent implementation review
 
-Both Qwen sessions completed. Review fixes were applied to source without restarting the user's packaged application or querying a model.
+All three agents completed. Their work spans process memory telemetry and a Compute graph (A), shared session lifecycle and experimental Direct delegation controls (B), and cache-aware usage accounting plus bundled instruction improvements (C). Detailed reports are in `coordination/round2/`.
 
-## UI agent
+The implementation quality was good: agents created focused mock tests, coordinated changes to shared UI files, reviewed each other's boundaries, and documented unverified work. The weak points were integration gaps the tests did not initially cover. Review fixed wrong RSS fallback page sizing, hidden permission-limited processes, bars that rescaled after sorting, polling churn on every app snapshot, request counters shown as zeros when unavailable, context values that mixed cached input, and missing per-turn usage while reasoning streamed. Existing bundled instructions also did not refresh across upgrades.
 
-Useful, focused improvements: workspace groups, local unread indicators, error recovery that preserves drafts, keyboard tab navigation/resizing, artifact source controls, and light-theme contrast. Good ownership discipline and documentation. Its isolated tests missed integration behavior.
+The review added startup headroom messaging and two focused skills for local work and authorized peer coordination. It preserves user-edited skills and conversation snapshots.
 
-Fixed reply completion/error activity timestamps, reading hidden conversations (board/settings/background views), and workspace ordering when an older session is pinned. Added a pinned-workspace regression and completion timestamp coverage.
+Validation passed: 101 backend tests, TypeScript/Vite build, Python bridge tests, 10 renderer helper tests, 4 status-component checks, the existing fake-provider Electron acceptance, and a new isolated Electron process-chart check with synthetic data. No models were loaded or queried. The production build still reports a large JavaScript chunk warning. Live-provider delegation and non-Linux process telemetry remain unqualified.
 
-## Backend agent
-
-Substantial experimental Direct-chat delegation implementation: streamed calls, validation, read-only children, parked parents releasing slots, cancellation, recovery, and mock coverage. Good architectural direction, but the reported budgets were not fully enforced.
-
-Fixed per-round and remaining-turn tool-call enforcement and duplicate transcript entries; counted parked requests toward the provider-round cap; combined multiple waits instead of discarding all but the last; routed interleaved unindexed fragments by call identity; and preserved live delegation records when pruning history. Added four backend regressions covering limits, parked continuations, fragment routing, and multiple waits.
-
-## Verification
-
-- 55 backend tests pass using mocks/local fixture servers.
-- 10 UI logic checks pass.
-- TypeScript and production Vite build pass (existing bundle-size warning remains).
-- Mock Python bridge test passes.
-- Isolated Electron acceptance passes: queue/context isolation, skills, artifact sandbox, guided tasks, navigation/responsiveness, and persistence.
-- No models loaded or queried for review or validation.
-
-Tool-driven delegation is still experimental, Direct-only, and not exposed by the renderer. Live-provider protocol qualification and dedicated GUI integration remain future work. The existing Electron test covers guided delegation; automated delegation is covered by backend mocks/SSE fixtures. Source and dist were updated; the packaged executable was not rebuilt or restarted.
+The three-agent experiment used a 6 GiB reserve with three slots after explicit user approval. At its end, Relay was restored to the original 8 GiB reserve and two-slot model setting.

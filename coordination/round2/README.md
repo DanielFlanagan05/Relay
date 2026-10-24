@@ -1,0 +1,13 @@
+# Three-agent collaboration experiment
+
+This instruction supersedes the earlier AGENT_ASSIGNMENTS.md prohibition on communication and strict ownership, for these three sessions only. User explicitly authorizes these peers to collaborate through files here. Read IMPROVEMENT_PLAN.md and AGENT_REVIEW.md, then the relevant implementation reports/code only. Preserve reviewed changes.
+
+A: lead system-wide process memory telemetry and Local compute graph from the plan; ask B for UI help or review.
+B: lead experimental Direct delegation opt-in, status/task UI, additive types; coordinate shared App.tsx/types changes with A; ask C to review capability wording and regressions.
+C: lead accurate per-turn usage/rate accounting (including reasoning/tool-only activity and cache-aware context reporting where actually available), plus improve Relay's bundled concise/review/subagents instructions from evidence. Review A/B boundaries when requested. Do not invent provider metrics or label estimates as measurements.
+
+Overlap is allowed: any agent can review or help another area after agreeing scope. Communicate by appending timestamped, signed short messages to A.inbox.md/B.inbox.md/C.inbox.md. Check inboxes at phase boundaries (not polling loops). Write your own A.status.md/B.status.md/C.status.md with current work, file claims and next step. Before editing any shared source file, acquire an advisory lock using mkdir coordination/round2/claims/<encoded-path>; put owner and intent inside it. Release only your own locks after edits and checks. If already claimed, message owner and work elsewhere; never remove another agent's lock. Read current contents before each edit. This is cooperation, not enforced filesystem isolation.
+
+Within your first few tool calls, post your plan/status and send one concrete interface proposal/question to a peer. Keep user-visible updates short. Finish a bounded useful slice, test it, report remaining work in your own coordination/round2/<letter>.report.md. Do not wait indefinitely for peers or claim their work is verified without evidence.
+
+No real inference tests, model loading, runtime changes, extra agents, dependency installs, packaging, global formatting, or changes to user data. The three current coding sessions are authorized. Use focused mocks and TypeScript checks. Do not run shared dist builds or Electron acceptance concurrently; leave these for reviewer. Never stop/restart the app/runtime hosting you. Keep delegation explicitly experimental and unsupported native routes disabled. No new filesystem/network abilities for generated content.

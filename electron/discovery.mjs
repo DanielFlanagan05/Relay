@@ -101,6 +101,7 @@ export function importLocalModels(root) {
       endpoint: `http://127.0.0.1:${p.port || 8080}/v1`,
       context: p.context,
       parallel: p.sessions || 1,
+      baselineParallel: p.sessions || 1,
       slotGiB: 4,
       estimatedGiB: p.estimated_gib || 0,
       installed: !!verified[p.model],

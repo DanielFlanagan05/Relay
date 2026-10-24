@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode, isValidElement } from "react";
+import { memo, useMemo, useState, type ReactNode, isValidElement } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import hljs from "highlight.js/lib/common";
@@ -92,7 +92,11 @@ function CodeBlock({ children }: { children: ReactNode }) {
     block
   );
 }
-export function Markdown({ children }: { children: string }) {
+// Memoized on the message string: a workspace snapshot re-renders the whole
+// message list every ~70 ms while any session streams, and re-parsing an
+// unchanged document through react-markdown dominated that cost
+// (coordination/round4/B.perf.md; tests/markdown_memo.test.mjs).
+export const Markdown = memo(function Markdown({ children }: { children: string }) {
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
@@ -118,4 +122,4 @@ export function Markdown({ children }: { children: string }) {
       {children}
     </ReactMarkdown>
   );
-}
+});

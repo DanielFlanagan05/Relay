@@ -1,0 +1,183 @@
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -52,6 +52,16 @@
+ import { SkillSelector } from "./features/skills/SkillSelector";
+ import { SkillLibrary } from "./features/skills/SkillLibrary";
+ import { Markdown } from "./features/conversation/Markdown";
++import {
++  DelegationToggle,
++  StatusNotice,
++  StatusPill,
++} from "./features/status/SessionStatusUI";
++import {
++  deriveSessionStatus,
++  openRoundFor,
++  statusLabelFor,
++} from "./features/status/sessionStatus";
+ import { ResizeHandle } from "./components/ResizeHandle";
+ import { ProcessMemory } from "./features/compute/ProcessMemory";
+ import {
+@@ -591,7 +601,9 @@
+                             )}{" "}
+                             {short(m)}
+                             <span className="row-dot">·</span>
+-                            {busy(s) ? s.status : basename(s.cwd)}
++                            {busy(s)
++                              ? statusLabelFor(s, data.delegations, data.tasks)
++                              : basename(s.cwd)}
+                           </span>
+                         </span>
+                         {isUnread(s, readState || {}, visibleSessionId) && (
+@@ -740,10 +752,14 @@
+                     {session.cwd || "No workspace selected"}
+                   </span>
+                   <span className="tag">{session.harness}</span>
+-                  <span className={cx("state-label", session.status)}>
+-                    <span />
+-                    {session.status === "idle" ? "Ready" : session.status}
+-                  </span>
++                  <StatusPill
++                    status={deriveSessionStatus({
++                      session,
++                      round: openRoundFor(session.id, data.delegations),
++                      tasks: data.tasks,
++                    })}
++                    fallback={session.status}
++                  />
+                 </div>
+               </div>
+               <div className="session-actions">
+@@ -1236,6 +1252,13 @@
+   const pinnedToBottom = useRef(true);
+   const [awayFromBottom, setAwayFromBottom] = useState(false);
+   const inFlight = busy(session);
++  // One derivation for the whole session view: queued, loading, generating,
++  // waiting for children, stopped, interrupted - never a guess.
++  const status = deriveSessionStatus({
++    session,
++    round: openRoundFor(session.id, data.delegations),
++    tasks: data.tasks,
++  });
+   const pool = data.pools.find((p) => p.modelId === session.modelId);
+   useEffect(() => {
+     const timer = setTimeout(() => {
+@@ -1360,27 +1383,8 @@
+             </div>
+           </div>
+         )}
+-        {session.status === "queued" && (
+-          <div className="queue-notice">
+-            <Layers size={16} />
+-            <span>{session.queueReason}</span>
+-          </div>
+-        )}
+-        {session.status === "loading" && (
+-          <div className="queue-notice">
+-            <LoaderCircle size={16} className="spin" />
+-            <span>
+-              Preparing shared model runtime. Other sessions will reuse this
+-              instance.
+-            </span>
+-          </div>
+-        )}
+-        {session.status === "interrupted" && (
+-          <div className="queue-notice">
+-            <Activity size={16} />
+-            <span>{session.queueReason}</span>
+-          </div>
+-        )}
++        {/* `session.error` already renders the fuller inline error card above. */}
++        {status.state !== "failed" && <StatusNotice status={status} />}
+       </div>
+       {awayFromBottom && (
+         <button
+@@ -1421,6 +1425,15 @@
+             <option value="read-only">Read only</option>
+             <option value="workspace-write">Workspace write</option>
+           </select>
++          <DelegationToggle
++            session={session}
++            busy={inFlight}
++            rounds={data.delegations}
++            tasks={data.tasks}
++            update={(patch) =>
++              call("updateSession", { sid: session.id, patch })
++            }
++          />
+           <select
+             aria-label="Output format"
+             value={session.outputFormat}
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -112,6 +112,9 @@
+   outputFormat: "auto" | "markdown" | "html";
+   preset?: string;
+   taskId?: string;
++  // Experimental, per-session opt-in for tool-driven delegation (Direct chat only).
++  // The backend gate rejects every other route, so this is never an implied capability.
++  delegation?: boolean;
+   pinned: boolean;
+   archived: boolean;
+   parentId?: string;
+@@ -139,6 +142,9 @@
+ export type Snapshot = {
+   sessions: Session[];
+   tasks: AgentTask[];
++  // Already present in the snapshot payload; typed here so the status UI can tell
++  // "queued for a slot" apart from "waiting for delegated children".
++  delegations?: import("./features/status/sessionStatus").DelegationRound[];
+   models: Model[];
+   hooks: Hook[];
+   settings: Settings;
+--- a/src/styles.css
++++ b/src/styles.css
+@@ -3618,3 +3618,49 @@
+     transition: none;
+   }
+ }
++/* Agent B: truthful lifecycle states + the experimental delegation switch.
++   Colour is never the only signal: every state also has its own text label. */
++.state-label.waiting_children > span {
++  background: var(--accent);
++}
++.state-label.stopped > span,
++.state-label.interrupted > span {
++  background: var(--amber);
++}
++.state-label.failed > span {
++  background: #d18b8b;
++}
++.state-label.unknown > span {
++  background: #777c86;
++}
++.queue-notice strong {
++  font-weight: 600;
++}
++.delegation-toggle {
++  display: inline-flex;
++  align-items: center;
++  gap: 5px;
++  font-size: 10px;
++  color: var(--muted);
++  cursor: pointer;
++}
++.delegation-toggle em {
++  font-style: normal;
++  font-size: 8px;
++  letter-spacing: 0.04em;
++  text-transform: uppercase;
++  opacity: 0.7;
++  margin-left: 4px;
++}
++.delegation-toggle.on {
++  color: var(--accent);
++}
++.delegation-toggle.locked {
++  opacity: 0.55;
++  cursor: not-allowed;
++}
++@media (prefers-reduced-motion: reduce) {
++  .queue-notice .spin {
++    animation: none;
++  }
++}

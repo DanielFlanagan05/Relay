@@ -52,7 +52,25 @@ import { ArtifactPanel } from "./features/artifacts/ArtifactPanel";
 import { SkillSelector } from "./features/skills/SkillSelector";
 import { SkillLibrary } from "./features/skills/SkillLibrary";
 import { Markdown } from "./features/conversation/Markdown";
+import { useSlashCommands } from "./features/commands/SlashSuggest";
+import {
+  latestOutcome,
+  outcomeLine,
+  outcomeVisible,
+} from "./features/commands/commandOutcomes";
+import {
+  DelegationToggle,
+  StatusNotice,
+  StatusPill,
+} from "./features/status/SessionStatusUI";
+import {
+  deriveSessionStatus,
+  openRoundFor,
+  statusLabelFor,
+} from "./features/status/sessionStatus";
 import { ResizeHandle } from "./components/ResizeHandle";
+import { ContextUsage } from "./features/context/ContextUsage";
+import { ProcessMemory } from "./features/compute/ProcessMemory";
 import {
   SAFE_PARSE,
   filterSessions,
@@ -64,13 +82,15 @@ import {
   seedReadState,
   type ReadState,
 } from "./features/sessions/sessionLogic";
-import type {
-  Hook,
-  Message,
-  Model,
-  Session,
-  Settings,
-  Snapshot,
+import {
+  THINKING_LEVELS,
+  type Hook,
+  type Message,
+  type Model,
+  type Session,
+  type Settings,
+  type Snapshot,
+  type ThinkingLevel,
 } from "./types";
 
 type View = "sessions" | "compute" | "connections" | "library" | "settings";
@@ -82,6 +102,25 @@ const compact = (n: number) =>
   n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : `${n}`;
 const basename = (p: string) =>
   p.split("/").filter(Boolean).at(-1) || "No workspace";
+// Native slash-command outcomes (phase 2) are stored on the session, never
+// as chat messages; this renders the newest one while it is still recent.
+function CommandOutcomeBlock({ session }: { session: Session }) {
+  const entry = latestOutcome(session.commandLog);
+  if (!outcomeVisible(entry, Date.now())) return null;
+  return (
+    <div
+      className={cx(
+        "command-outcome",
+        entry!.status !== "ok" && "failed",
+      )}
+      role="status"
+    >
+      <span>{outcomeLine(entry!)}</span>
+      <time dateTime={entry!.at}>{new Date(entry!.at).toLocaleTimeString()}</time>
+    </div>
+  );
+}
+
 const cx = (...v: (string | false | undefined)[]) =>
   v.filter(Boolean).join(" ");
 const modKey = platformModKey(
@@ -590,7 +629,9 @@ export function App() {
                             )}{" "}
                             {short(m)}
                             <span className="row-dot">·</span>
-                            {busy(s) ? s.status : basename(s.cwd)}
+                            {busy(s)
+                              ? statusLabelFor(s, data.delegations, data.tasks)
+                              : basename(s.cwd)}
                           </span>
                         </span>
                         {isUnread(s, readState || {}, visibleSessionId) && (
@@ -739,10 +780,14 @@ export function App() {
                     {session.cwd || "No workspace selected"}
                   </span>
                   <span className="tag">{session.harness}</span>
-                  <span className={cx("state-label", session.status)}>
-                    <span />
-                    {session.status === "idle" ? "Ready" : session.status}
-                  </span>
+                  <StatusPill
+                    status={deriveSessionStatus({
+                      session,
+                      round: openRoundFor(session.id, data.delegations),
+                      tasks: data.tasks,
+                    })}
+                    fallback={session.status}
+                  />
                 </div>
               </div>
               <div className="session-actions">
@@ -1235,6 +1280,23 @@ function Conversation({
   const pinnedToBottom = useRef(true);
   const [awayFromBottom, setAwayFromBottom] = useState(false);
   const inFlight = busy(session);
+  // Native harness slash-command suggestions (local catalog only). The pure
+  // behavior lives in src/features/commands/; direct chat gets no suggestions.
+  const slash = useSlashCommands({
+    harness: session.harness,
+    sessionId: session.id,
+    draft,
+    setDraft,
+    call,
+    disabled: session.archived || !!session.taskId,
+  });
+  // One derivation for the whole session view: queued, loading, generating,
+  // waiting for children, stopped, interrupted - never a guess.
+  const status = deriveSessionStatus({
+    session,
+    round: openRoundFor(session.id, data.delegations),
+    tasks: data.tasks,
+  });
   const pool = data.pools.find((p) => p.modelId === session.modelId);
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -1252,9 +1314,25 @@ function Conversation({
   }, [session.messages]);
   async function send() {
     if (!draft.trim() || inFlight || sending || session.taskId) return;
+    // A draft whose first token is a discovered native command dispatches via
+    // commands:run and is never sent as chat text; "//" sends a literal slash.
+    const intent = slash.classify(draft);
+    if (intent.kind === "command") {
+      try {
+        const result = await call<{ reason?: string }>("commands:run", {
+          sessionId: session.id,
+          name: intent.name,
+          args: intent.args,
+        });
+        notify(result?.reason || `/${intent.name} was not executed.`);
+      } catch (e) {
+        notify((e as Error).message);
+      }
+      return;
+    }
     setSending(true);
     try {
-      await window.relay.call("send", { sid: session.id, text: draft });
+      await window.relay.call("send", { sid: session.id, text: intent.text });
       setDraft("");
     } catch (e) {
       notify((e as Error).message);
@@ -1265,6 +1343,7 @@ function Conversation({
   }
   return (
     <section className="conversation">
+      <CommandOutcomeBlock session={session} />
       <div
         className="messages"
         ref={scroll}
@@ -1359,27 +1438,8 @@ function Conversation({
             </div>
           </div>
         )}
-        {session.status === "queued" && (
-          <div className="queue-notice">
-            <Layers size={16} />
-            <span>{session.queueReason}</span>
-          </div>
-        )}
-        {session.status === "loading" && (
-          <div className="queue-notice">
-            <LoaderCircle size={16} className="spin" />
-            <span>
-              Preparing shared model runtime. Other sessions will reuse this
-              instance.
-            </span>
-          </div>
-        )}
-        {session.status === "interrupted" && (
-          <div className="queue-notice">
-            <Activity size={16} />
-            <span>{session.queueReason}</span>
-          </div>
-        )}
+        {/* `session.error` already renders the fuller inline error card above. */}
+        {status.state !== "failed" && <StatusNotice status={status} />}
       </div>
       {awayFromBottom && (
         <button
@@ -1420,6 +1480,24 @@ function Conversation({
             <option value="read-only">Read only</option>
             <option value="workspace-write">Workspace write</option>
           </select>
+          <DelegationToggle
+            session={session}
+            busy={inFlight}
+            rounds={data.delegations}
+            tasks={data.tasks}
+            update={(patch) =>
+              call("updateSession", { sid: session.id, patch })
+            }
+          />
+          {session.harness === "pi" && (
+            <ThinkingSelect
+              value={session.thinking || "default"}
+              disabled={inFlight}
+              onChange={(thinking) =>
+                call("updateSession", { sid: session.id, patch: { thinking } })
+              }
+            />
+          )}
           <select
             aria-label="Output format"
             value={session.outputFormat}
@@ -1442,19 +1520,26 @@ function Conversation({
             ))}
           </div>
         </div>
+        <ContextUsage session={session} model={model} />
         <div className={cx("composer", session.archived && "disabled")}>
+          {slash.list}
           <textarea
             ref={textarea}
             aria-label="Message your agent"
+            role="combobox"
+            aria-expanded={slash.open}
+            aria-controls="slash-suggest-listbox"
+            aria-autocomplete="list"
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             placeholder={
               session.archived
                 ? "Restore this session to continue…"
-                : "Give your agent something to work on…"
+                : "Give your agent something to work on… / for native commands"
             }
             disabled={session.archived || !!session.taskId}
             onKeyDown={(e) => {
+              if (slash.onKeyDown(e)) return;
               if (
                 e.key === "Enter" &&
                 !e.shiftKey &&
@@ -1674,13 +1759,24 @@ function MessageView({
           (m.usage || m.elapsedMs || m.status === "stopped") && (
             <div className="message-stats">
               {m.status === "stopped" && <span>Stopped</span>}
-              {!!m.usage?.output && (
-                <span>{compact(m.usage.output)} tokens</span>
+              {!!(m.turnUsage?.output || m.usage?.output) && (
+                <span
+                  title={`Measured output tokens${
+                    m.requests && m.requests > 1
+                      ? ` across ${m.requests} provider requests`
+                      : ""
+                  }`}
+                >
+                  {compact((m.turnUsage?.output || m.usage?.output) ?? 0)}{" "}
+                  tokens
+                  {m.requests && m.requests > 1 ? ` · ${m.requests} req` : ""}
+                </span>
               )}
               {!!m.tokensPerSecond && (
-                <span>
+                <span title="Reported output / active turn time, including prefill and tools; excludes startup and queued waits. Not engine decode speed. Live usage may lag the current request.">
                   {m.estimatedRate ? "~" : ""}
                   {m.tokensPerSecond.toFixed(1)} tok/s
+                  {m.rateKind === "turn-throughput" ? " turn" : ""}
                   {m.estimatedRate ? " estimated" : ""}
                 </span>
               )}
@@ -1706,7 +1802,7 @@ function SessionInspector({
 }) {
   const pool = data.pools.find((p) => p.modelId === session.modelId);
   const last = session.messages.filter((m) => m.role === "assistant").at(-1);
-  const used = last?.usage?.input || 0;
+  const used = last?.usage?.contextInput;
   return (
     <aside className="inspector">
       <div className="inspector-title">
@@ -1764,13 +1860,21 @@ function SessionInspector({
       <section>
         <div className="inspector-label">CONTEXT & USAGE</div>
         <div className="detail-row">
-          <span>Last input</span>
-          <span>{used ? `${compact(used)} tokens` : "—"}</span>
+          <span>Last request context input</span>
+          <span>
+            {used !== undefined ? `${compact(used)} tokens` : "Unavailable"}
+          </span>
         </div>
+        {last?.usage?.cacheRead !== undefined && (
+          <div className="detail-row">
+            <span>Reported cached input</span>
+            <span>{compact(last.usage.cacheRead)} tokens</span>
+          </div>
+        )}
         <div className="meter violet-meter">
           <span
             style={{
-              width: `${Math.min(100, (used / (model?.context || 1)) * 100)}%`,
+              width: `${Math.min(100, ((used ?? 0) / (model?.context || 1)) * 100)}%`,
             }}
           />
         </div>
@@ -1781,9 +1885,36 @@ function SessionInspector({
           </span>
         </div>
         <div className="detail-row">
-          <span>Last output</span>
-          <span>{last?.usage?.output ? compact(last.usage.output) : "—"}</span>
+          <span>Last reported output</span>
+          <span>
+            {last?.usage?.output !== undefined
+              ? compact(last.usage.output)
+              : "—"}
+          </span>
         </div>
+        {last?.turnUsage && (
+          <div className="detail-row">
+            <span>
+              Turn total{last.requests ? ` · ${last.requests} requests` : ""}
+            </span>
+            <span>
+              {last.turnUsage.input !== undefined
+                ? compact(last.turnUsage.input)
+                : "—"}{" "}
+              in ·{" "}
+              {last.turnUsage.output !== undefined
+                ? compact(last.turnUsage.output)
+                : "—"}{" "}
+              out
+            </span>
+          </div>
+        )}
+        {last?.usage?.reasoning !== undefined && (
+          <div className="detail-row">
+            <span>Reasoning output</span>
+            <span>{compact(last.usage.reasoning)} tokens</span>
+          </div>
+        )}
       </section>
       <section>
         <div className="inspector-label">PERMISSIONS</div>
@@ -1848,6 +1979,7 @@ function NewSession({
   const [harness, setHarness] = useState(model?.harness || "direct");
   const [cwd, setCwd] = useState(recent?.cwd || "");
   const [preset, setPreset] = useState("chat");
+  const [thinking, setThinking] = useState<ThinkingLevel>("default");
   const [permission, setPermission] =
     useState<Session["permission"]>("read-only");
   const defaultsFor = (path: string) => {
@@ -1865,7 +1997,9 @@ function NewSession({
           ? ["review"]
           : preset === "plan"
             ? ["plan"]
-            : []),
+            : preset === "implement"
+              ? ["local-work"]
+              : []),
       ]),
     ]);
   }, [cwd, preset]);
@@ -1969,6 +2103,12 @@ function NewSession({
             ))}
           </div>
         </label>
+        {harness === "pi" && (
+          <label>
+            Thinking level
+            <ThinkingSelect value={thinking} onChange={setThinking} />
+          </label>
+        )}
         <label>
           Workspace<span className="optional">Optional for chat</span>
           <div className="input-action">
@@ -2077,6 +2217,7 @@ function NewSession({
               hookIds: hooks,
               preset,
               permission,
+              ...(harness === "pi" ? { thinking } : {}),
             });
             setPending(false);
             if (sid) {
@@ -2248,6 +2389,12 @@ function Compute({
                   </button>
                 </div>
               </div>
+              {pool.startupGiB !== undefined && !pool.blocked && (
+                <div className="pool-note">
+                  Estimated startup requirement: {pool.startupGiB.toFixed(1)}{" "}
+                  GiB including system reserve.
+                </div>
+              )}
               {pool.blocked && <div className="pool-note">{pool.blocked}</div>}
             </div>
           );
@@ -2262,7 +2409,9 @@ function Compute({
             another copy of its weights. Each session still needs KV cache and
             prefill headroom. Individual token rates can decrease as concurrency
             increases. Runtime capacity and available memory determine when the
-            next turn starts.
+            next turn starts. Native coding harnesses hold a slot for their
+            whole turn, including tool work; queued peers cannot reply until a
+            slot is released.
           </p>
           <span>
             {data.memory.source} · Swap in use: {data.memory.swapGiB.toFixed(1)}{" "}
@@ -2270,6 +2419,7 @@ function Compute({
           </span>
         </div>
       </div>
+      <ProcessMemory call={call} />
     </div>
   );
 }
@@ -3039,5 +3189,34 @@ function CommandPalette({
           ))}
       </div>
     </Modal>
+  );
+}
+
+// Pi's --thinking level. "Default" passes no flag, so the harness decides.
+function ThinkingSelect({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: ThinkingLevel;
+  onChange: (value: ThinkingLevel) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <select
+      aria-label="Thinking level"
+      title="Pi reasoning level for the next turn"
+      value={value}
+      disabled={disabled}
+      onChange={(e) => onChange(e.target.value as ThinkingLevel)}
+    >
+      {THINKING_LEVELS.map((level) => (
+        <option key={level} value={level}>
+          {level === "default"
+            ? "Thinking: Default"
+            : `Thinking: ${level[0].toUpperCase()}${level.slice(1)}`}
+        </option>
+      ))}
+    </select>
   );
 }

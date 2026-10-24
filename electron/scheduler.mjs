@@ -1,5 +1,6 @@
 // Each pool represents one model runtime, never one runtime per conversation.
 // Reservations cover independent KV/prefill growth; already-resident weights aren't charged per session.
+// A resident managed runtime preallocated its KV/cache at launch, so MemAvailable already reflects it.
 export class Scheduler {
   constructor({ inspect, memory, reserveGiB, execute, changed = () => {} }) {
     Object.assign(this, { inspect, memory, reserveGiB, execute, changed });
@@ -30,13 +31,14 @@ export class Scheduler {
       pool.parallel
     )
       return `All ${pool.parallel} shared inference slots are busy`;
-    if (pool.local) {
+    if (pool.local && !pool.resident) {
       const mem = this.memory();
       if (!Number.isFinite(mem.availableGiB))
         return "Memory telemetry is unavailable; local work is waiting";
       const reserved = active
-        .filter((j) => this.inspect(j.modelId).local)
-        .reduce((n, j) => n + this.inspect(j.modelId).slotGiB, 0);
+        .map((j) => this.inspect(j.modelId))
+        .filter((p) => p.local && !p.resident)
+        .reduce((n, p) => n + p.slotGiB, 0);
       if (mem.availableGiB - reserved - pool.slotGiB < this.reserveGiB())
         return "Waiting for memory headroom (KV cache + system reserve)";
     }

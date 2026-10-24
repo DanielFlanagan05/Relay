@@ -23,13 +23,15 @@ import { AgentService } from "./service.mjs";
 import { id } from "./store.mjs";
 import { taskInput } from "./tasks.mjs";
 import { validateArtifact } from "./artifacts.mjs";
+import { CommandCatalog, runNativeCommand } from "./commands.mjs";
+import { collectProcesses } from "./processTelemetry.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
 if (process.env.RELAY_DATA_DIR)
   app.setPath("userData", resolve(process.env.RELAY_DATA_DIR));
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.quit();
-let window, service;
+let window, service, commandCatalog;
 const text = z.string().max(10000),
   sid = z.string().uuid();
 const model = z
@@ -55,6 +57,17 @@ const hook = z
     category: z.enum(["style", "workflow", "output"]).optional(),
   })
   .strict();
+// Pi reasoning level; "default" passes no --thinking flag (the harness decides).
+const thinkingLevel = z.enum([
+  "default",
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
 const sessionPatch = z
   .object({
     title: z.string().min(1).max(250).optional(),
@@ -70,6 +83,7 @@ const sessionPatch = z
     nextTurnHookIds: z.array(text).max(30).optional(),
     disabledNextTurnHookIds: z.array(text).max(30).optional(),
     outputFormat: z.enum(["auto", "markdown", "html"]).optional(),
+    thinking: thinkingLevel.optional(),
     draft: z.string().max(200000).optional(),
     // Experimental, per-session opt-in. Direct chat only; the backend rejects
     // every other route rather than pretending a native harness is bridged.
@@ -79,6 +93,9 @@ const sessionPatch = z
 const schemas = {
   snapshot: z.object({}),
   refresh: z.object({}),
+  // Display-only per-process memory for the Local compute page. No input, and the
+  // payload carries only PID, name, owner uid, and measured resident memory.
+  processes: z.object({}).strict(),
   chooseFolder: z.object({}),
   openData: z.object({}),
   create: z
@@ -89,11 +106,31 @@ const schemas = {
       hookIds: z.array(text).max(30).optional(),
       permission: z.enum(["read-only", "workspace-write"]).optional(),
       preset: z.enum(["chat", "implement", "review", "plan"]).optional(),
+      thinking: thinkingLevel.optional(),
       delegation: z.boolean().optional(),
     })
     .strict(),
   updateSession: z.object({ sid, patch: sessionPatch }).strict(),
   send: z.object({ sid, text: z.string().trim().min(1).max(200000) }).strict(),
+  // Native harness slash commands. Deliberately separate from `send`: a
+  // command never enters the prompt/inference path. Discovery is local-only
+  // (electron/commands.mjs); phase 1 execution returns an explicit reason.
+  commandsList: z.object({ sessionId: sid }).strict(),
+  commandsRefresh: z
+    .object({
+      harness: z.enum(["pi", "opencode", "hermes", "codex", "claude"]),
+    })
+    .strict(),
+  commandsRun: z
+    .object({
+      sessionId: sid,
+      name: z
+        .string()
+        .regex(/^\/?[a-z][a-z0-9_-]{0,49}$/i)
+        .max(50),
+      args: z.string().max(4000).optional(),
+    })
+    .strict(),
   cancel: z.object({ sid }).strict(),
   fork: z.object({ sid }).strict(),
   remove: z.object({ sid }).strict(),
@@ -206,6 +243,8 @@ async function action(name, input) {
       service.refreshModels();
       service.changed();
       return service.snapshot();
+    case "processes":
+      return collectProcesses();
     case "create":
       return service.create(data);
     case "updateSession":
@@ -214,6 +253,15 @@ async function action(name, input) {
       return service.send(data.sid, data.text);
     case "cancel":
       return service.cancel(data.sid);
+    case "commands:list":
+      return commandCatalog.get(service.store.session(data.sessionId).harness);
+    case "commands:refresh":
+      return commandCatalog.refresh(data.harness);
+    case "commands:run":
+      // Never a send and never a shell: verified Pi commands execute over
+      // Pi's own RPC control interface (electron/piControl.mjs); every other
+      // route keeps runNativeCommand's explicit refusal.
+      return service.runCommand(data.sessionId, data.name, data.args || "");
     case "fork":
       return service.fork(data.sid);
     case "handoff":
@@ -334,11 +382,15 @@ if (gotLock)
     const directory = app.getPath("userData");
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     secretFile = join(directory, "credentials.json");
+    commandCatalog = new CommandCatalog({
+      file: join(directory, "command-catalog.json"),
+    });
     const candidates = [
       process.env.RELAY_LOCALAI_ROOT,
       join(homedir(), "dev/LocalAi"),
     ].filter(Boolean);
     service = new AgentService(directory, {
+      commandCatalog,
       secret: getSecret,
       localaiRoot:
         candidates.find((p) =>

@@ -1,0 +1,12 @@
+# Agent B — Native harness slash commands (phase 1)
+
+Read `coordination/round3/README.md` first, then IMPROVEMENT_PLAN.md §2 "Native harness slash commands" (and its P1 row).
+
+Phase 1 scope (keep it bounded):
+1. **Local discovery + cache** — new `electron/commands.mjs`: a catalog provider per harness (Pi, OpenCode, Hermes, Codex, Claude Code). For each *installed* harness, determine what local source actually exists (machine-readable protocol/init metadata, bundled command manifests/registries in the installed package, completion metadata). `--help` CLI flags are not a slash-command catalog. Discovery subprocesses must be time/output bounded and must not call a model or the network. Record name, aliases, description, args, source, harness version, discoveredAt. Cache with fingerprint/version invalidation; manual refresh. If a harness has no usable local catalog, report it as unavailable/incomplete rather than hand-writing a universal list. Document per-harness findings in your report.
+2. **IPC** — additive, validated (zod) actions in `electron/main.mjs` + preload: `commands:list(sessionId)`, `commands:refresh(harness)`, and `commands:run(sessionId, name, args)` that is separate from `send`, bypasses `effectivePrompt`/instruction injection, and in phase 1 returns an explicit "execution not supported for this harness/mode" result unless you verify a real native control interface in an adapter. Never turn a command into a chat prompt.
+3. **Composer suggestions** — new `src/features/commands/SlashSuggest.tsx` (+ pure logic): typing `/` at the start of the draft opens a listbox for the active session's harness, prefix filtering on names/aliases, shows description/args and unsupported reason, ArrowUp/Down, Enter/Tab insert, Escape dismiss, IME-safe (ignore during composition). Direct chat shows no native commands. Provide a way to send a literal leading slash (e.g. `//` or an option). Distinguish native commands from Relay actions and skills.
+4. **Tests** — `tests/commands.test.mjs` with fake installed-harness fixtures in a temp dir: discovery, update adding/removing commands invalidates cache, missing/partial catalogs, no network, run() bypasses send/inference. Pure-logic tests for filtering/keyboard.
+5. Report in `coordination/round3/B.report.md`; rates in `B.rates.md`.
+
+Agent A is editing the composer area in `src/App.tsx` for a context-usage indicator. Mount your component with a minimal hook-in and use the claims lock.

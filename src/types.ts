@@ -1,3 +1,15 @@
+export const THINKING_LEVELS = [
+  "default",
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
+export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+
 export type AgentTask = {
   id: string;
   parentSessionId: string;
@@ -69,6 +81,7 @@ export type Model = {
   parallel: number;
   slotGiB: number;
   estimatedGiB?: number;
+  baselineParallel?: number;
   description?: string;
 };
 export type Message = {
@@ -90,7 +103,30 @@ export type Message = {
   instructionWarnings?: string[];
   artifacts?: Artifact[];
   artifactErrors?: string[];
-  usage?: { input: number; output: number };
+  // Fields are present only when the provider/harness actually reported
+  // them; absence means unavailable, never zero.
+  usage?: {
+    contextInput?: number;
+    scope?: "request" | "turn";
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+    reasoning?: number;
+  };
+  // Cumulative measured usage across every provider request in this turn
+  // (delegation rounds included). Not context occupancy: use usage.contextInput when available.
+  turnUsage?: {
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+    reasoning?: number;
+  };
+  requests?: number;
+  usageReports?: number;
+  activeMs?: number;
+  rateKind?: "turn-throughput";
   tokensPerSecond?: number;
   estimatedRate?: boolean;
   elapsedMs?: number;
@@ -111,7 +147,26 @@ export type Session = {
   disabledNextTurnHookIds: string[];
   outputFormat: "auto" | "markdown" | "html";
   preset?: string;
+  // Pi only. Absent or "default" passes no --thinking flag.
+  thinking?: ThinkingLevel;
   taskId?: string;
+  // Experimental, per-session opt-in for tool-driven delegation (Direct chat only).
+  // The backend gate rejects every other route, so this is never an implied capability.
+  delegation?: boolean;
+  // Written only from an explicit, verifiable harness compaction event (Pi's
+  // compaction_start/compaction_end); a token-count decrease alone is never
+  // treated as proof of compaction. Absence means "no confirmed compaction".
+  compaction?: { status: "running" | "done" | "failed"; at: string };
+  // Native slash-command outcomes (phase 2). Recorded separately from chat
+  // messages — a command result is never model output — and never replayed
+  // after an app restart. Newest last, bounded by the backend.
+  commandLog?: {
+    command: string;
+    status: string; // "ok" | "failed" (unknown values render generically)
+    at: string;
+    reason?: string;
+    summary?: string;
+  }[];
   pinned: boolean;
   archived: boolean;
   parentId?: string;
@@ -135,10 +190,14 @@ export type Pool = {
   queued: number;
   paused: boolean;
   blocked?: string;
+  startupGiB?: number;
 };
 export type Snapshot = {
   sessions: Session[];
   tasks: AgentTask[];
+  // Already present in the snapshot payload; typed here so the status UI can tell
+  // "queued for a slot" apart from "waiting for delegated children".
+  delegations?: import("./features/status/sessionStatus").DelegationRound[];
   models: Model[];
   hooks: Hook[];
   settings: Settings;
@@ -156,6 +215,34 @@ export type Snapshot = {
     sessions: number;
     owned: boolean;
   } | null;
+};
+// Measured per-process memory from the backend collector. `available: false` means
+// the metric could not be measured; it never means "no processes".
+export type ProcessSample = {
+  pid: number;
+  name: string;
+  uid: number | null;
+  own: boolean;
+  rss: number | null;
+  memoryReason?: string;
+  relay?: boolean;
+};
+export type ProcessTelemetry = {
+  available: boolean;
+  metric: string;
+  metricLabel: string;
+  collectedAt: string;
+  system: {
+    totalGiB: number;
+    availableGiB: number;
+    swapGiB: number;
+    source: string;
+  } | null;
+  processes: ProcessSample[];
+  errors: string[];
+  permissionLimited: boolean;
+  truncated: boolean;
+  skipped: number;
 };
 declare global {
   interface Window {

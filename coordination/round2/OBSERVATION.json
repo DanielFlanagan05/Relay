@@ -1,0 +1,38 @@
+{
+  "observedAt": "2026-10-23T00:08:02.220717+00:00",
+  "sessions": [
+    {
+      "agent": "A",
+      "requests": 10,
+      "output": 1738,
+      "context": 22665,
+      "compactions": 0,
+      "decodeRange": [
+        18.3,
+        20.8
+      ],
+      "requestTps": 13.178647255080376
+    },
+    {
+      "agent": "B",
+      "requests": 12,
+      "output": 2342,
+      "context": 23780,
+      "compactions": 0,
+      "decodeRange": [
+        18.6,
+        21.1
+      ],
+      "requestTps": 13.294732061762035
+    },
+    {
+      "agent": "C",
+      "requests": 0,
+      "output": 0,
+      "context": 0,
+      "compactions": 0,
+      "decodeRange": null,
+      "requestTps": null
+    }
+  ]
+}

@@ -102,6 +102,16 @@ export class Store {
           value.hooks.push(skill);
     }
     value.hooks = value.hooks.map((h) => normalizeSkill(h));
+    // Update packaged instructions only; personal overrides and turn snapshots are immutable here.
+    for (const bundled of bundledSkills()) {
+      const index = value.hooks.findIndex((h) => h.id === bundled.id);
+      if (index < 0) value.hooks.push(bundled);
+      else if (
+        value.hooks[index].origin === "bundled" &&
+        bundled.revision > value.hooks[index].revision
+      )
+        value.hooks[index] = bundled;
+    }
     value.sessions = value.sessions.map((s) => ({
       nextTurnHookIds: [],
       disabledNextTurnHookIds: [],
@@ -158,6 +168,7 @@ export class Store {
     parentId,
     permission = "read-only",
     preset = "chat",
+    thinking = "default",
     delegation = false,
   }) {
     const session = {
@@ -172,6 +183,7 @@ export class Store {
       disabledNextTurnHookIds: [],
       outputFormat: "auto",
       preset,
+      thinking,
       delegation: !!delegation,
       parentId,
       createdAt: now(),

@@ -13,7 +13,7 @@
     "description": "Terse responses, useful detail",
     "category": "style",
     "requires": [],
-    "revision": 1
+    "revision": 2
   },
   {
     "id": "plan",
@@ -29,7 +29,7 @@
     "description": "Actionable findings with evidence",
     "category": "workflow",
     "requires": [],
-    "revision": 1
+    "revision": 2
   },
   {
     "id": "verify",
@@ -45,7 +45,7 @@
     "description": "Preserve the decisions and next steps",
     "category": "workflow",
     "requires": [],
-    "revision": 1
+    "revision": 2
   },
   {
     "id": "subagents",
@@ -55,7 +55,7 @@
     "requires": [
       "delegation"
     ],
-    "revision": 1
+    "revision": 2
   },
   {
     "id": "html-output",
@@ -63,6 +63,27 @@
     "description": "Self-contained formatted artifacts",
     "category": "output",
     "requires": [],
+    "revision": 1
+  },
+  {
+    "id": "local-work",
+    "name": "Efficient local work",
+    "description": "Focused repository work with bounded context",
+    "category": "workflow",
+    "requires": [
+      "readFiles"
+    ],
+    "revision": 1
+  },
+  {
+    "id": "teamwork",
+    "name": "Coordinate with peers",
+    "description": "User-authorized shared-workspace collaboration",
+    "category": "workflow",
+    "requires": [
+      "readFiles",
+      "writeFiles"
+    ],
     "revision": 1
   }
 ]

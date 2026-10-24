@@ -105,6 +105,9 @@ export function commandFor(
       model.profile || model.model,
       "--tools",
       readOnly ? "read,grep,find,ls" : "read,grep,find,ls,edit,write,bash",
+      ...(session.thinking && session.thinking !== "default"
+        ? ["--thinking", session.thinking]
+        : []),
     ];
     input = prompt;
   } else if (name === "opencode") {
@@ -346,6 +349,7 @@ export async function runDirect({
     text = "",
     finishReason = "";
   const streamed = new ToolCallAccumulator();
+  let latestUsage;
   for await (const line of lines(response.body)) {
     if (!line.startsWith("data:")) continue;
     const data = line.slice(5).trim();
@@ -366,19 +370,21 @@ export async function runDirect({
     if (typeof event.choices?.[0]?.finish_reason === "string")
       finishReason = event.choices[0].finish_reason;
     if (event.usage)
-      emit({
-        type: "usage",
-        value: {
-          input: event.usage.prompt_tokens,
-          output: event.usage.completion_tokens,
-        },
-      });
+      latestUsage = {
+        input: event.usage.prompt_tokens,
+        contextInput: event.usage.prompt_tokens,
+        scope: "request",
+        output: event.usage.completion_tokens,
+        cacheRead: event.usage.prompt_tokens_details?.cached_tokens,
+        reasoning: event.usage.completion_tokens_details?.reasoning_tokens,
+      };
     if (event.choices?.[0]?.finish_reason === "length")
       emit({
         type: "diagnostic",
         value: "Output token limit reached. Send “continue” to continue.",
       });
   }
+  if (latestUsage) emit({ type: "usage", value: latestUsage });
   const calls = streamed.completed();
   if (!sawText && !calls.length)
     throw new Error(
