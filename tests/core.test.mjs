@@ -756,3 +756,23 @@ test("managed startup preflight includes extra slots and reserve but not residen
   assert.equal(service.pool(model().id).startupGiB, undefined);
   assert.equal(service.pool(model().id).blocked, "");
 });
+
+test("Gufo startup preflight requires only the RAM cache floor the bridge can shrink to", (t) => {
+  const service = serviceFixture(t, async () => {}, {
+    memorySource: () => ({ availableGiB: 102 }),
+    runtimeSource: () => null,
+  });
+  Object.assign(service.store.data.models[0], {
+    managed: true,
+    profile: "flash",
+    estimatedGiB: 103,
+    cacheGiB: 12,
+    baselineParallel: 1,
+    parallel: 1,
+    slotGiB: 4,
+  });
+  const pool = service.pool(model().id);
+  // 91 GiB base + 2 GiB cache floor + the 8 GiB default reserve.
+  assert.equal(pool.startupGiB, 101);
+  assert.equal(pool.blocked, "");
+});

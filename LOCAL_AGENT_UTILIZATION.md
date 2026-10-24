@@ -73,3 +73,31 @@ All 129 tests, `tsc`, and the bridge tests pass. Nothing is committed.
 3. **Widen the memory margin.** The LocalAi watchdog killed gufo-flash at 20:02:45 when MemAvailable fell below the 8 GiB reserve. The 12 GiB RAM cache was nearly full and Relay was relaunching. The options are lowering `cache_gib` (for example to 8), lowering the reserve, or not relaunching Relay while a runtime is loaded. This is the user's decision.
 4. **Make measurement automatic.** The agents' hand-written rate logs were misattributed or incomplete. Relay should record per-request prefill and decode rates against session IDs from the runtime log instead of asking agents to log them.
 5. **Keep the instructions lean.** Prefill is cheap here thanks to the cache. The extra cost of long briefs comes from the reasoning they provoke, not from reading them.
+
+## Round 4 (Pi native commands, transcript performance)
+
+### Review
+
+- **A (`/compact`, `/session` over Pi RPC).** The design is sound: an allowlist pinned to Pi 1.x, one RPC record per run, and compaction routed through the scheduler. Three bugs were fixed after review:
+  - Stop never reached a running `/compact`. The scheduler's abort signal was not passed to `runPiRpc`.
+  - A control job skipped `ensureRuntime`, so `/compact` failed whenever the managed model was not loaded.
+  - Stopping a queued `/compact` ran `fail()`, which marked the session's last chat answer as stopped.
+- **A's `A.rates.md` cites sources that do not exist** (`~/logs/serve-main.log`, `docker logs localai`, Ollama). Its numbers should be treated as unverified. The table below comes from `runtime.log`.
+- **B (transcript performance).** The measurements are credible and the `React.memo` fix on `Markdown` is correct (re-render 100 ms → 2 ms). The main finding still stands: every streamed token pays for a full snapshot and `save()` of the whole store, so per-session event deltas are the next performance step.
+
+### Measured rates (runtime.log, per agent)
+
+| Run | Requests | Prompt | Generated | Decode tok/s, median (p10–p90) | Prefill tok/s, median (big prefills) | MTP accept | TTFT median |
+|---|---|---|---|---|---|---|---|
+| A, run 1 | 84 | 2.3k → 106k | 57.8k | 39.5 (33.9–51.4) | 348 (828) | 65% | 604 ms |
+| B, run 1 | 23 | 2.3k → 38k | 17.6k | 43.5 (37.6–56.8) | 645 (922) | 72% | 1221 ms |
+| A, run 2 | 74 | 106k → 159k | 37.6k | 41.7 (36.5–53.5) | 245 | 68% | 489 ms |
+| B, run 2 | 27 | 38k → 69k | 23.5k | 45.0 (39.0–52.6) | 221 (1024) | 73% | 392 ms |
+
+All runs were serial (`plan=serial-c1`), and the memory cache served most prompts. The "small" prefill medians are dominated by short increments, where fixed overhead dominates.
+
+### Why both runs were killed
+
+Gufo's 12 GiB RAM prompt cache fills as turns run. About 18 GiB was free after load, so a full cache left about 6 GiB, which is under the 8 GiB reserve, and the watchdog stopped the runtime (twice).
+
+**Fix:** `localai_bridge.py` now sizes `cache_gib` to the headroom that exists at launch: profile size at most, 2 GiB at least, with 1 GiB of slack. Relay's startup preflight only requires that 2 GiB floor, so Gufo needs about 101 GiB free to start instead of 111.

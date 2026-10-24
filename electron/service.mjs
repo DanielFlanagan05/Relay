@@ -38,6 +38,9 @@ import {
   estimateOutputTokens,
 } from "./usage.mjs";
 
+// Matches MIN_CACHE_GIB in localai_bridge.py: the smallest Gufo RAM cache it launches with.
+const MIN_CACHE_GIB = 2;
+
 export class AgentService extends EventEmitter {
   constructor(
     directory,
@@ -155,9 +158,12 @@ export class AgentService extends EventEmitter {
     if (m.managed && runtime?.profile === m.profile)
       parallel = Math.min(parallel, runtime.profile_settings?.sessions || 1);
     // Match the controller's startup footprint; resident weights are never charged twice.
+    // Gufo's RAM cache is fitted to the headroom at launch, so only its floor is required.
     const startupGiB =
       m.managed && !runtime && m.estimatedGiB > 0 && m.baselineParallel
-        ? m.estimatedGiB +
+        ? m.estimatedGiB -
+          (m.cacheGiB || 0) +
+          Math.min(m.cacheGiB || 0, MIN_CACHE_GIB) +
           Math.max(0, m.parallel - m.baselineParallel) * m.slotGiB +
           this.store.data.settings.reserveGiB
         : undefined;
@@ -472,7 +478,14 @@ export class AgentService extends EventEmitter {
     // A native slash-command control job (Pi /compact) holds an inference
     // slot but has no answer message; it runs through PiCommands instead of
     // the turn pipeline below.
-    if (job.control) return job.run();
+    if (job.control) {
+      // Pi compacts with the model, so the managed runtime must be up first.
+      const model = this.store.model(job.modelId);
+      if (model.managed && !this.runner)
+        await this.ensureRuntime(model, job.controller.signal);
+      job.controller.signal.throwIfAborted();
+      return job.run();
+    }
     const s = this.store.session(job.sessionId),
       model = this.store.model(job.modelId);
     const answer = s.messages.find((m) => m.id === job.answerId);
@@ -784,7 +797,13 @@ export class AgentService extends EventEmitter {
         this.changed(true);
       }
     }
+    // A queued control command (/compact) has no answer message to stop.
+    const pending = this.scheduler.pending.find((j) => j.sessionId === sid);
     const queued = this.scheduler.cancel(sid);
+    if (queued && pending?.control) {
+      this.commands.record(s, pending.command, "canceled", "Stopped before it started.");
+      return;
+    }
     if (queued)
       this.fail(
         s,

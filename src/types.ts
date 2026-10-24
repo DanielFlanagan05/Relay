@@ -176,11 +176,27 @@ export type Session = {
 };
 export type Settings = {
   reserveGiB: number;
+  relayReserveGiB: number;
   cloudParallel: number;
   defaultHooks: string[];
   workspaceHooks?: Record<string, { enabled: string[]; disabled: string[] }>;
   localaiRoot: string;
   theme: "dark" | "light";
+};
+// relay.slice placement and the app.slice MemoryHigh cap (electron/memoryGuard.mjs).
+export type MemoryGuardStatus = {
+  inRelaySlice: boolean;
+  capGiB: number | null;
+  error: string;
+  appSliceGiB: number | null;
+  relaySliceGiB: number | null;
+};
+export type AppUnit = {
+  unit: string;
+  name: string;
+  bytes: number | null;
+  processes: { pid: number; name: string }[];
+  protected: string;
 };
 export type Pool = {
   modelId: string;

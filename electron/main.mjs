@@ -25,6 +25,7 @@ import { taskInput } from "./tasks.mjs";
 import { validateArtifact } from "./artifacts.mjs";
 import { CommandCatalog, runNativeCommand } from "./commands.mjs";
 import { collectProcesses } from "./processTelemetry.mjs";
+import { MemoryGuard } from "./memoryGuard.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
 if (process.env.RELAY_DATA_DIR)
@@ -96,6 +97,17 @@ const schemas = {
   // Display-only per-process memory for the Local compute page. No input, and the
   // payload carries only PID, name, owner uid, and measured resident memory.
   processes: z.object({}).strict(),
+  // relay.slice placement and the app.slice cap; app units Relay may close.
+  memoryGuard: z.object({}).strict(),
+  memoryApps: z.object({}).strict(),
+  closeApps: z
+    .object({
+      units: z
+        .array(z.string().regex(/^[\w@.:\\-]+\.(service|scope)$/))
+        .min(1)
+        .max(40),
+    })
+    .strict(),
   chooseFolder: z.object({}),
   openData: z.object({}),
   create: z
@@ -168,6 +180,7 @@ const schemas = {
   settings: z
     .object({
       reserveGiB: z.number().min(2).max(128),
+      relayReserveGiB: z.number().int().min(0).max(1024),
       cloudParallel: z.number().int().min(1).max(16),
       defaultHooks: z.array(text).max(30),
       workspaceHooks: z
@@ -186,6 +199,15 @@ const schemas = {
     .strict(),
 };
 let secretFile;
+const memoryGuard = new MemoryGuard();
+// Pull a detached LocalAi runtime (and its supervisor) into relay.slice too.
+function syncMemoryGuard() {
+  const runtime = service.runtimeSource();
+  return memoryGuard.sync(service.store.data.settings.relayReserveGiB, [
+    runtime?.pid,
+    runtime?.supervisor_pid,
+  ]);
+}
 function secrets() {
   try {
     return JSON.parse(readFileSync(secretFile, "utf8"));
@@ -245,6 +267,12 @@ async function action(name, input) {
       return service.snapshot();
     case "processes":
       return collectProcesses();
+    case "memoryGuard":
+      return memoryGuard.status();
+    case "memoryApps":
+      return memoryGuard.apps();
+    case "closeApps":
+      return memoryGuard.close(data.units);
     case "create":
       return service.create(data);
     case "updateSession":
@@ -356,10 +384,13 @@ async function action(name, input) {
       return;
     case "unload":
       return service.unload();
-    case "settings":
+    case "settings": {
+      const reserve = service.store.data.settings.relayReserveGiB;
       Object.assign(service.store.data.settings, data);
       service.changed(true);
+      if (data.relayReserveGiB !== reserve) return syncMemoryGuard();
       return;
+    }
     case "openData":
       return shell.openPath(service.directory);
     case "export": {
@@ -397,6 +428,11 @@ if (gotLock)
           existsSync(join(p, "config/linux/profiles.json")),
         ) || "",
     });
+    // Chromium re-scopes its main process early in startup; retry until Relay stays put.
+    for (const delay of [0, 3000, 15000, 60000])
+      setTimeout(() => {
+        if (!memoryGuard.state.inRelaySlice) syncMemoryGuard().catch(() => {});
+      }, delay);
     ipcMain.handle("relay:action", async (event, name, input) => {
       if (
         event.sender !== window?.webContents ||
@@ -484,4 +520,8 @@ if (gotLock)
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
-app.on("before-quit", () => service?.close());
+app.on("before-quit", () => {
+  service?.close();
+  // The reserve only holds while Relay runs.
+  memoryGuard.releaseSync();
+});

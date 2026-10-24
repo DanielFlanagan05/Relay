@@ -3855,3 +3855,50 @@ html[data-theme="light"] .proc-bar {
   font-size: 9px;
   white-space: nowrap;
 }
+
+/* Close apps to free memory (Compute page) */
+.close-apps-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 16px 0;
+}
+.close-apps-bar p {
+  margin: 0;
+  color: var(--muted);
+}
+.close-apps-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 20px;
+  max-height: 55vh;
+  overflow: auto;
+}
+.close-apps-list li {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.close-apps-list label,
+.close-apps-list li > strong {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.close-apps-list label span,
+.close-apps-list li > span {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+.close-apps-list p {
+  margin: 4px 0 0 26px;
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.button.danger {
+  border-color: rgba(234, 120, 120, 0.5);
+}
+.setting-error {
+  color: #eaa7a7 !important;
+}

@@ -23,6 +23,8 @@ export const defaults = () => ({
   delegations: [],
   settings: {
     reserveGiB: 8,
+    // RAM held for Relay and its models by capping other apps; 0 = off.
+    relayReserveGiB: 0,
     cloudParallel: 4,
     defaultHooks: ["careful"],
     workspaceHooks: {},

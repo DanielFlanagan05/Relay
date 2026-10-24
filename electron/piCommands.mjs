@@ -102,11 +102,12 @@ export class PiCommands {
           sessionId: sid,
           modelId: s.modelId,
           control: true,
+          command: clean,
           controller,
           waiting: () => {},
           failed: (error) =>
             this.record(s, clean, "failed", `/${clean} failed: ${error.message}`),
-          run: () => this.execute(s, clean, args, mapped, spec),
+          run: () => this.execute(s, clean, args, mapped, spec, controller.signal),
         });
         return {
           executed: true,
@@ -133,7 +134,7 @@ export class PiCommands {
       return "";
     }
   }
-  async execute(s, clean, args, mapped, spec) {
+  async execute(s, clean, args, mapped, spec, signal) {
     const service = this.service;
     // Pi may emit compaction events while the command runs; normalize them
     // exactly like a turn's events and feed session.compaction.
@@ -157,6 +158,7 @@ export class PiCommands {
       params: mapped.toParams(args || ""),
       timeoutMs: mapped.timeoutMs,
       cwd: s.cwd || undefined,
+      signal,
       onEventLine: feed,
     });
     if (result.ok) {

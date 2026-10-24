@@ -431,3 +431,36 @@ test("the prompt path is never used: no imports of prompt builders, no shell, no
     assert.ok(!source.match(/\bshell:\s*true\b/), `${file} must not use a shell`);
   }
 });
+
+test("Stop reaches a running /compact: the scheduler job's abort signal is passed to the RPC", async (t) => {
+  const dir = scratch(t);
+  const { service, enqueued } = fakeService(dir);
+  const commands = new PiCommands({ service });
+  let seen;
+  commands.execute = async (...args) => {
+    seen = args[5];
+    return { executed: false };
+  };
+  await commands.run("s1", "compact");
+  assert.equal(enqueued[0].command, "compact");
+  enqueued[0].controller.abort();
+  await enqueued[0].run();
+  assert.equal(seen, enqueued[0].controller.signal);
+  assert.equal(seen.aborted, true);
+});
+
+test("runPiRpc stops the control process when its signal aborts", async (t) => {
+  const { dir, file } = fakePi(t);
+  const cfg = caseFile(dir, "hang", { expectCommand: "compact", mode: "hang" });
+  const controller = new AbortController();
+  const pending = runPiRpc({
+    spec: { command: file, args: [], env: { ...process.env, FAKE_PI_CASE: cfg } },
+    command: "compact",
+    timeoutMs: 10_000,
+    signal: controller.signal,
+  });
+  setTimeout(() => controller.abort(), 100);
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.match(result.error, /stopped/);
+});

@@ -104,6 +104,8 @@ export function importLocalModels(root) {
       baselineParallel: p.sessions || 1,
       slotGiB: 4,
       estimatedGiB: p.estimated_gib || 0,
+      // Gufo's RAM prompt cache; the bridge shrinks it to fit launch headroom.
+      cacheGiB: p.engine === "gufo" ? p.cache_gib || 0 : 0,
       installed: !!verified[p.model],
       experimental: /experimental|test|candidate/i.test(
         profile + " " + (p.display_name || ""),

@@ -10,7 +10,28 @@ from pathlib import Path
 import sys
 
 
-def configure(controller, profile_name, sessions, slot_gib, reserve_gib=None):
+GIB = 1024 ** 3
+# Smallest prompt cache worth keeping; the disk cache still backs restores.
+MIN_CACHE_GIB = 2
+
+
+def fit_cache(profile, available_gib):
+    """Size Gufo's RAM prompt cache to the headroom that exists at launch.
+
+    The cache fills as turns run. Sized past the headroom, it pushes free memory
+    under the reserve and the watchdog stops the runtime mid-task.
+    """
+    cache = profile.get('cache_gib')
+    if profile.get('engine') != 'gufo' or not cache:
+        return
+    base = profile['estimated_gib'] - cache
+    room = int(available_gib - base - profile['minimum_free_gib'] - 1)  # 1 GiB for drift
+    fitted = max(MIN_CACHE_GIB, min(cache, room))
+    profile['cache_gib'] = fitted
+    profile['estimated_gib'] = base + fitted
+
+
+def configure(controller, profile_name, sessions, slot_gib, reserve_gib=None, available_gib=None):
     if reserve_gib is not None and not 2 <= reserve_gib <= 128:
         raise ValueError('Invalid system memory reserve')
     original_profiles = controller.profiles
@@ -21,6 +42,9 @@ def configure(controller, profile_name, sessions, slot_gib, reserve_gib=None):
         profile['minimum_free_gib'] = reserve_gib
     # Reserve extra KV/prefill space, while counting model weights only once.
     profile['estimated_gib'] = profile.get('estimated_gib', 0) + max(0, sessions - baseline) * slot_gib
+    if available_gib is None:
+        available_gib = controller.memory()['unified_available_bytes'] / GIB
+    fit_cache(profile, available_gib)
     controller.profiles = lambda: {**original_profiles(), profile_name: profile}
     original_command = controller.engine_command
 
@@ -55,6 +79,9 @@ def main():
     if controller.running(args.profile):
         raise RuntimeError('An existing inference runtime owns this slot. Reuse it or stop it before resizing.')
     configure(controller, args.profile, args.sessions, args.slot_gib, args.reserve_gib)
+    cache = controller.profiles()[args.profile].get('cache_gib')
+    if cache:
+        print(f'Relay runtime: RAM prompt cache sized to {cache} GiB for launch headroom', file=sys.stderr, flush=True)
     return controller.serve(args.profile)
 
 

@@ -71,6 +71,7 @@ import {
 import { ResizeHandle } from "./components/ResizeHandle";
 import { ContextUsage } from "./features/context/ContextUsage";
 import { ProcessMemory } from "./features/compute/ProcessMemory";
+import { formatMemory } from "./features/compute/processMemoryLogic";
 import {
   SAFE_PARSE,
   filterSessions,
@@ -84,7 +85,9 @@ import {
 } from "./features/sessions/sessionLogic";
 import {
   THINKING_LEVELS,
+  type AppUnit,
   type Hook,
+  type MemoryGuardStatus,
   type Message,
   type Model,
   type Session,
@@ -2419,7 +2422,185 @@ function Compute({
           </span>
         </div>
       </div>
+      <CloseApps call={call} />
       <ProcessMemory call={call} />
+    </div>
+  );
+}
+// Lists the user's other apps by memory; closing needs a second, explicit
+// confirmation that names every app and process, and sends SIGTERM only.
+function CloseApps({ call }: { call: Call }) {
+  const [apps, setApps] = useState<AppUnit[]>();
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [confirming, setConfirming] = useState(false);
+  const [results, setResults] = useState<{ unit: string; ok: boolean; error?: string }[]>();
+  const load = async () => {
+    setApps((await call<AppUnit[]>("memoryApps")) || []);
+    setPicked(new Set());
+  };
+  const close = () => {
+    setApps(undefined);
+    setConfirming(false);
+    setResults(undefined);
+  };
+  const chosen = (apps || []).filter((a) => picked.has(a.unit));
+  const freed = chosen.reduce((n, a) => n + (a.bytes || 0), 0);
+  return (
+    <>
+      <div className="close-apps-bar">
+        <p>
+          Need headroom for a local model? Close other apps you are not using.
+        </p>
+        <button className="button" onClick={load}>
+          <Trash2 size={14} /> Close apps to free memory…
+        </button>
+      </div>
+      {apps && (
+        <Modal
+          wide
+          title={confirming ? `Close ${chosen.length} app${chosen.length === 1 ? "" : "s"}?` : "Close apps to free memory"}
+          description={
+            confirming
+              ? "Each app below is asked to quit (SIGTERM), like closing its window. Unsaved work in them may be lost."
+              : "Your desktop apps, largest first. Memory is each app's cgroup usage, including its cache. Nothing closes until you confirm."
+          }
+          close={close}
+        >
+          {results ? (
+            <ul className="close-apps-list">
+              {results.map((r) => (
+                <li key={r.unit}>
+                  <strong>{apps.find((a) => a.unit === r.unit)?.name || r.unit}</strong>
+                  <span>{r.ok ? "Asked to quit" : `Not closed: ${r.error}`}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <ul className="close-apps-list">
+              {(confirming ? chosen : apps).map((a) => (
+                <li key={a.unit}>
+                  <label>
+                    {!confirming && (
+                      <input
+                        type="checkbox"
+                        disabled={!!a.protected}
+                        checked={picked.has(a.unit)}
+                        onChange={(e) => {
+                          const next = new Set(picked);
+                          e.target.checked ? next.add(a.unit) : next.delete(a.unit);
+                          setPicked(next);
+                        }}
+                      />
+                    )}
+                    <strong>{a.name}</strong>
+                    <span>{a.bytes === null ? "unmeasured" : formatMemory(a.bytes)}</span>
+                  </label>
+                  <p>
+                    {a.protected ||
+                      a.processes
+                        .slice(0, 12)
+                        .map((p) => `${p.name} (${p.pid})`)
+                        .join(", ") +
+                        (a.processes.length > 12 ? ` and ${a.processes.length - 12} more` : "")}
+                  </p>
+                </li>
+              ))}
+              {!apps.length && <li>No other apps are running in your session.</li>}
+            </ul>
+          )}
+          <div className="modal-footer">
+            {results ? (
+              <button className="button primary" onClick={close}>
+                Done
+              </button>
+            ) : confirming ? (
+              <>
+                <button className="button" onClick={() => setConfirming(false)}>
+                  Back
+                </button>
+                <button
+                  className="button danger"
+                  onClick={async () =>
+                    setResults(
+                      (await call<{ unit: string; ok: boolean; error?: string }[]>("closeApps", {
+                        units: chosen.map((a) => a.unit),
+                      })) || [],
+                    )
+                  }
+                >
+                  Close {chosen.length} app{chosen.length === 1 ? "" : "s"}
+                </button>
+              </>
+            ) : (
+              <>
+                <button className="button" onClick={close}>
+                  Cancel
+                </button>
+                <button
+                  className="button primary"
+                  disabled={!chosen.length}
+                  onClick={() => setConfirming(true)}
+                >
+                  Review {chosen.length || ""} to close · frees about {formatMemory(freed)}
+                </button>
+              </>
+            )}
+          </div>
+        </Modal>
+      )}
+    </>
+  );
+}
+function RelayReserve({
+  value,
+  save,
+  call,
+}: {
+  value: number;
+  save: (p: Partial<Settings>) => unknown;
+  call: Call;
+}) {
+  const [draft, setDraft] = useState(String(value));
+  const [status, setStatus] = useState<MemoryGuardStatus>();
+  const refresh = async () => setStatus(await call<MemoryGuardStatus>("memoryGuard"));
+  useEffect(() => {
+    refresh();
+  }, []);
+  const commit = async () => {
+    const n = Math.round(+draft);
+    if (!Number.isFinite(n) || n < 0 || n === value) return setDraft(String(value));
+    await save({ relayReserveGiB: n });
+    refresh();
+  };
+  return (
+    <div className="setting-row">
+      <div>
+        <strong>Memory reserved for Relay</strong>
+        <p>
+          Caps your other apps at total RAM minus this, while Relay is open. Over
+          the cap they are slowed and swapped, not closed. 0 turns it off.
+        </p>
+        {status && (
+          <p className={status.error ? "setting-error" : ""}>
+            {status.error
+              ? status.error
+              : `${status.inRelaySlice ? "Relay runs in relay.slice" : "Relay is not in relay.slice"}${status.relaySliceGiB !== null ? ` (${status.relaySliceGiB.toFixed(1)} GiB)` : ""} · ${status.capGiB !== null ? `other apps capped at ${status.capGiB} GiB` : "other apps uncapped"}${status.appSliceGiB !== null ? `, using ${status.appSliceGiB.toFixed(1)} GiB` : ""}`}
+          </p>
+        )}
+      </div>
+      <label className="number-unit">
+        <input
+          aria-label="Memory reserved for Relay"
+          type="number"
+          min={0}
+          max={1024}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => e.key === "Enter" && commit()}
+        />
+        GiB
+      </label>
     </div>
   );
 }
@@ -2638,6 +2819,11 @@ function SettingsPage({
       </section>
       <section className="settings-section">
         <h3>Scheduling</h3>
+        <RelayReserve
+          value={data.settings.relayReserveGiB ?? 0}
+          save={save}
+          call={call}
+        />
         <div className="setting-row">
           <div>
             <strong>System memory reserve</strong>
