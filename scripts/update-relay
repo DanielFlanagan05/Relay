@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Build Relay and install it to ~/Applications/Relay with an app-menu entry.
+#
+# Usage: update-relay [--skip-build] [--restart]
+#   --skip-build  install the existing release/linux-unpacked without rebuilding
+#   --restart     quit a running installed Relay before replacing it, then relaunch it
+set -euo pipefail
+
+REPO="${RELAY_REPO:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
+INSTALL_DIR="${RELAY_INSTALL_DIR:-$HOME/Applications/Relay}"
+APPS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+DESKTOP_FILE="$APPS_DIR/relay.desktop"
+BIN_NAME="relay-agent-workspace"
+
+skip_build=0
+restart=0
+for arg in "$@"; do
+  case "$arg" in
+    --skip-build) skip_build=1 ;;
+    --restart) restart=1 ;;
+    -h|--help) sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "update-relay: unknown option: $arg" >&2; exit 2 ;;
+  esac
+done
+
+step() { printf '\n==> %s\n' "$*"; }
+
+cd "$REPO"
+
+if [[ $skip_build -eq 0 ]]; then
+  if [[ ! -d node_modules || package-lock.json -nt node_modules ]]; then
+    step "Installing dependencies"
+    npm install
+  fi
+  step "Building Relay (npm run package)"
+  npm run package
+fi
+
+UNPACKED="$REPO/release/linux-unpacked"
+if [[ ! -x "$UNPACKED/$BIN_NAME" ]]; then
+  echo "update-relay: build output missing: $UNPACKED/$BIN_NAME" >&2
+  exit 1
+fi
+
+was_running=0
+if pgrep -f "^$INSTALL_DIR/$BIN_NAME" >/dev/null; then
+  if [[ $restart -eq 1 ]]; then
+    step "Quitting running Relay"
+    was_running=1
+    pkill -TERM -f "^$INSTALL_DIR/$BIN_NAME" || true
+    for _ in $(seq 1 50); do
+      pgrep -f "^$INSTALL_DIR/$BIN_NAME" >/dev/null || break
+      sleep 0.2
+    done
+    if pgrep -f "^$INSTALL_DIR/$BIN_NAME" >/dev/null; then
+      echo "update-relay: Relay did not quit within 10s; close it and rerun." >&2
+      exit 1
+    fi
+  else
+    echo "update-relay: Relay is running from $INSTALL_DIR." >&2
+    echo "Close it first, or rerun with --restart to quit and relaunch it." >&2
+    exit 1
+  fi
+fi
+
+step "Installing to $INSTALL_DIR"
+mkdir -p "$(dirname "$INSTALL_DIR")"
+staging="$INSTALL_DIR.new"
+rm -rf "$staging"
+cp -a "$UNPACKED" "$staging"
+cp "$REPO/build/icon.png" "$staging/relay.png"
+# Swap the new build in, keeping the previous one until the swap succeeds.
+if [[ -d "$INSTALL_DIR" ]]; then
+  rm -rf "$INSTALL_DIR.old"
+  mv "$INSTALL_DIR" "$INSTALL_DIR.old"
+fi
+mv "$staging" "$INSTALL_DIR"
+rm -rf "$INSTALL_DIR.old"
+
+step "Writing app-menu entry $DESKTOP_FILE"
+mkdir -p "$APPS_DIR"
+cat >"$DESKTOP_FILE" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Relay
+GenericName=Agent Workspace
+Comment=A desktop workspace for shared-model agent sessions
+Exec="$INSTALL_DIR/$BIN_NAME" %U
+Icon=$INSTALL_DIR/relay.png
+Terminal=false
+Categories=Development;
+StartupNotify=true
+StartupWMClass=relay
+EOF
+chmod 644 "$DESKTOP_FILE"
+
+command -v update-desktop-database >/dev/null && update-desktop-database "$APPS_DIR" 2>/dev/null || true
+command -v kbuildsycoca6 >/dev/null && kbuildsycoca6 >/dev/null 2>&1 || true
+
+version="$(node -p "require('./package.json').version" 2>/dev/null || echo unknown)"
+step "Relay $version installed ($(git rev-parse --short HEAD 2>/dev/null || echo no-git))"
+
+if [[ $was_running -eq 1 ]]; then
+  step "Relaunching Relay"
+  setsid -f "$INSTALL_DIR/$BIN_NAME" >/dev/null 2>&1 </dev/null
+fi
